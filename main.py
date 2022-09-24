@@ -1,20 +1,206 @@
-# TO-DO: refactor code, save trips when they are not updated, if getTimetable() keep crashing if executed with getRT
-# iterate a timer of 5 secs if runningRT is ON, transform test_table in realtime delta of ttimes for traffic
-# sql is the cause of the crashes, maybe safe on file then write every hour
+# TO-DO:
 
-import pandas as pd
-import gtfs_kit as gk
-from google.transit import gtfs_realtime_pb2
-import mysql.connector
-import requests
-import threading
+import collections
+import csv
 import datetime
-import time
-import matplotlib.pyplot as plt
 import io
+import math
+import threading
+import time
+import zipfile
+import requests
+from google.transit import gtfs_realtime_pb2
 
-global db, cr, logger, test, stopTdict, stopsRT, routesRT, posRT, ttable, runningRT, runningGetTT, logtimesVals, testtableVals
-global stops, routes, trips, stop_times
+global logger, runningRT, runningGTFS, RT
+
+
+class RealTimeData:
+    """RT contains all the info got by every poll to the GTFSrt source"""
+
+    def __init__(self):
+        self.trips = {}
+        self.stops = {}
+        self.routes = {}
+        self.stopcodes = {}
+
+    def add_stop(self, stop_id, stop_name, stop_code):
+        """Adds a stop, stop["stop_times"] is a dict with trip_id+"-"+stop_id as keys"""
+        self.stops[stop_id] = {
+            "stop_name": stop_name,
+            "stop_code": stop_code,
+            "stop_times": {}
+        }
+        self.stopcodes[stop_code] = stop_id
+
+    def add_route(self, route_id, route_short_name):
+        self.routes[route_id] = {
+            "route_short_name": route_short_name,
+            "trips": {},
+            "timetable": collections.OrderedDict()
+        }
+
+    def delete_trip(self, trip_id):
+        for stop_time in self.trips[trip_id]["stop_times"]:
+            del self.stops[stop_time["stop_id"]]["stop_times"][trip_id + "-" + stop_time["stop_id"]]
+
+        del self.routes[self.trips[trip_id]["route_id"]]["trips"][trip_id]
+        del self.trips[trip_id]
+
+    def check_trip(self, trip_id):
+        """Checks if trip exists (returns 1), or not (returns 0)"""
+        if trip_id in self.trips:
+            return 1
+        else:
+            return 0
+
+    def get_trip(self, trip_id):
+        if trip_id in self.trips:
+            return self.trips[trip_id]
+        return None
+
+    def add_trip(self, trip_id, route_id, direction, headsign, limited):
+        self.trips[trip_id] = {
+            "route_id": route_id,
+            "route_short_name": self.routes[route_id]["route_short_name"],
+            "direction": direction,
+            "headsign": headsign,
+            "limited": limited,
+            "position": {
+                "latitude": None,
+                "longitude": None,
+                "bearing": 0,
+                "timestamp": 0
+            },
+            "stop_times": collections.OrderedDict(),
+            "stop_times_count": 0,
+            "recent_arrivals": {},
+            "timetable_version": ""
+        }
+        self.routes[route_id]["trips"][trip_id] = self.trips[trip_id]
+
+    def update_position_trip(self, trip_id, latitude, longitude, bearing, timestamp):
+        self.trips[trip_id]["position"]["latitude"] = latitude
+        self.trips[trip_id]["position"]["longitude"] = longitude
+        self.trips[trip_id]["position"]["bearing"] = bearing
+        self.trips[trip_id]["position"]["timestamp"] = timestamp
+
+    def set_stop_time(self, trip_id, stop_sequence, timestamp, std_dev):
+        self.trips[trip_id]["stop_times_count"] += 1
+        version = self.trips[trip_id]["timetable_version"]
+        route_id = self.trips[trip_id]["route_id"]
+        stop_id = self.routes[route_id]["timetable"][version][stop_sequence]["stop_id"]
+        self.trips[trip_id]["stop_times"][stop_id] = {
+            "stop_sequence": stop_sequence,
+            "timestamp": timestamp,
+            "std_dev": std_dev
+        }
+        if route_id not in self.stops[stop_id]["stop_times"]:
+            self.stops[stop_id]["stop_times"][route_id] = {
+                "route_short_name": self.routes[route_id]["route_short_name"],
+                "times": collections.OrderedDict()
+            }
+
+        self.stops[stop_id]["stop_times"][route_id]["times"][trip_id + "-" + stop_id] = {
+            "timestamp": timestamp,
+            "std_dev": std_dev
+        }
+
+    def add_timetable(self, route_id, stops_dic, version):
+        self.routes[route_id]["timetable"][version] = {}
+        i = 1
+        count = 0
+        while count < len(stops_dic):
+            if i in stops_dic:
+                self.routes[route_id]["timetable"][version][i] = {
+                    "stop_id": stops_dic[i],
+                    "times": [],
+                    "mean": 0,
+                    "var": 0,
+                    "N": 0,
+                    "std_dev": 0
+                }
+                count += 1
+            i += 1
+
+    def clear_stop_times(self, trip_id):
+        route_id = self.trips[trip_id]["route_id"]
+        for stop_id in self.trips[trip_id]["stop_times"]:
+            del self.stops[stop_id]["stop_times"][route_id]["times"][trip_id + "-" + stop_id]
+            if len(self.stops[stop_id]["stop_times"][route_id]["times"]) == 0:
+                del self.stops[stop_id]["stop_times"][route_id]
+
+        self.trips[trip_id]["stop_times_count"] = 0
+        del self.trips[trip_id]["stop_times"]
+        self.trips[trip_id]["stop_times"] = {}
+
+    def extend_stop_times(self, trip_id):
+        stop_times = self.trips[trip_id]["stop_times"]
+        stop_id = next(iter(stop_times))
+        last_tm = stop_times[stop_id]["timestamp"]
+        last_dev = 0
+        timetable = self.routes[self.trips[trip_id]["route_id"]]["timetable"][self.trips[trip_id]["timetable_version"]]
+
+        cnt = 0
+        reached_pos = False
+        for stop_sequence, time in timetable.items():
+            if reached_pos or time["stop_id"] in stop_times:
+                reached_pos = True
+                last_tm += time["mean"]
+                last_dev += time["std_dev"]
+                self.set_stop_time(trip_id, stop_sequence, last_tm, last_dev)
+                cnt += 1
+
+        self.trips[trip_id]["stop_times_count"] += cnt
+        return cnt
+
+    def add_arrival(self, trip_id, arrivals):
+        """
+        Used to update the timetable by using the previous arrivals time
+        :param trip_id:
+        :param arrivals: list of tuples (stop_sequence, timestamp of arrival)
+        :return:
+        """
+        recent_arrivals = self.trips[trip_id]["recent_arrivals"]
+
+        for i in range(len(arrivals)):
+            if arrivals[i][0] - 1 in recent_arrivals:
+                if arrivals[i][0] not in recent_arrivals:
+                    self.update_timetable(trip_id, arrivals[i][0], arrivals[i][1] - recent_arrivals[arrivals[i][0] - 1])
+                if i == 0:
+                    del recent_arrivals[arrivals[i][0] - 1]
+
+            recent_arrivals[arrivals[i][0]] = arrivals[i][1]
+
+    def clear_arrivals(self):
+        for trip_id in self.trips:
+            RT.trips[trip_id]["recent_arrivals"] = {}
+
+    def update_timetable(self, trip_id, stop_sequence, timedelta):
+        version = self.trips[trip_id]["timetable_version"]
+        if stop_sequence in self.routes[self.trips[trip_id]["route_id"]]["timetable"][version]:
+            timetable = self.routes[self.trips[trip_id]["route_id"]]["timetable"][version][stop_sequence]
+            timetable["times"].append(timedelta)
+
+            oldmean = timetable["mean"]
+            N = timetable["N"]
+
+            if N == 0:
+                timetable["mean"] = timedelta
+                timetable["var"] = 0
+                timetable["N"] = 1
+            else:
+                timetable["mean"] += (timedelta - oldmean) / (N + 1)
+                timetable["var"] = ((N - 1) * timetable["var"] + (timedelta - timetable["mean"]) * (
+                        timedelta - oldmean)) / N
+                if N >= 15:
+                    # max 15 entries in times, the oldest will be deleted
+                    timetable["mean"] += (timetable["mean"] - timetable["times"][0])/N
+                    timetable["var"] = ((N - 2) * timetable["var"] + (timetable["times"][0] - timetable["mean"]) * (
+                            timetable["times"][0] - oldmean)) / (N - 1)
+                    timetable["times"].pop(0)
+                else:
+                    timetable["N"] += 1
+            timetable["std_dev"] = math.sqrt(timetable["var"])
 
 
 def getDatetimeNowStr():
@@ -28,266 +214,174 @@ def getDatetimeNowStr():
 def getGTFS():
     """
         Retrieve GTFS data from "https://www.gtt.to.it/open_data/gtt_gtfs.zip"
-        and populates the following global variables
-         ``stops``, ``routes``, ``trips``, ``stop_times``
-         indexed by ``stop_id``, ``route_id``, ``trip_id``, (``trip_id``, ``stop_sequence``)
+        and populates RT
     """
+    global runningGTFS
+    runningGTFS = 1
     t = time.time()
     p = 'https://www.gtt.to.it/open_data/gtt_gtfs.zip'
 
-    try:
-        feed = (gk.read_feed(p, dist_units='km'))
-    except Exception as err:
-        logger(f'{getDatetimeNowStr()} <b>getGTFS()<\b>\ngk.read_feed() raised: {repr(err)},'
+    r = requests.get(p)
+    if not r.ok:
+        logger(f'{getDatetimeNowStr()} <b>getGTFS()<\b>\n error retrieving gtt_gtfs.zip,'
                f'\n calling getGTFS()')
         getGTFS()
-        return 0
+
+    archive = zipfile.ZipFile(io.BytesIO(r.content))
 
     print("--- retrieveGTFS: %s seconds ---" % (time.time() - t))
     t = time.time()
 
-    global stops, routes, trips, stop_times, stopTdict
-    stopTdict = {}
+    global RT
+    RT = RealTimeData()
 
-    df = feed.get_stops()
-    stops = df.set_index(['stop_id'])
+    s = archive.read('stops.txt').decode("utf-8").splitlines()[1:]
+    for row in csv.reader(s, quotechar='"', delimiter=',', quoting=csv.QUOTE_ALL, skipinitialspace=True):
+        # "stop_id", "stop_code", "stop_name", "stop_desc", "stop_lat", "stop_lon", "zone_id", "stop_url", "location_type", "parent_station", "stop_timezone", "wheelchair_boarding"
+        # passed to RT "stop_id", "stop_name", "stop_code"
+        RT.add_stop(row[0], row[2], row[1])
 
-    df = feed.get_routes()
-    routes = df.set_index(['route_id'])
+    s = archive.read('routes.txt').decode("utf-8").splitlines()[1:]
+    for row in csv.reader(s, quotechar='"', delimiter=',', quoting=csv.QUOTE_ALL, skipinitialspace=True):
+        # "route_id", "agency_id", "route_short_name", "route_long_name", "route_desc", "route_type", "route_url", "route_color", "route_text_color", "route_sort_order"
+        # passed to RT "route_id", "route_short_name"
+        RT.add_route(row[0], row[2])
 
-    df = feed.get_trips()
-    trips = df.set_index(['trip_id'])
+    s = archive.read('trips.txt').decode("utf-8").splitlines()[1:]
+    for row in csv.reader(s, quotechar='"', delimiter=',', quoting=csv.QUOTE_ALL, skipinitialspace=True):
+        # "route_id","service_id","trip_id","trip_headsign","trip_short_name","direction_id","block_id","shape_id","wheelchair_accessible","bikes_allowed","limited_route"
+        # passed to RT "trip_id", "route_id", "direction_id", "trip_headsign", "limited_route"
+        RT.add_trip(row[2], row[0], int(row[5]), row[3], int(row[10]))
 
-    df = feed.get_stop_times()
-    stop_times = df.set_index(['trip_id','stop_sequence'])
+    s = archive.read('stop_times.txt').decode("utf-8").splitlines()[1:]
+    times = {}
+    dt = datetime.datetime.now()
+    timetable_id = {}
+    """
+    {
+       route_id:
+       {
+            trip_id: 
+            {
+                dic: {stop_sequence: stop_id, ...}
+                set: set(stop_sequence-stop_id, ...)
+            }, ...
+       }, ...
+    }
+    """
+    for row in csv.reader(s, quotechar='"', delimiter=',', quoting=csv.QUOTE_ALL, skipinitialspace=True):
+        # "trip_id","arrival_time","departure_time","stop_id","stop_sequence","stop_headsign","pickup_type","drop_off_type","shape_dist_traveled","timepoint"
+        # passed to RT "trip_id", "stop_sequence", "stop_id"
+        route_id = RT.trips[row[0]]["route_id"]
+
+        if route_id not in timetable_id:
+            timetable_id[route_id] = {}
+            timetable_id[route_id][row[0]] = {
+                "dic": {int(row[4]): row[3]},
+                "set": {row[4]+"-"+row[3]}
+            }
+        elif row[0] not in timetable_id[route_id]:
+            timetable_id[route_id][row[0]] = {
+                "dic": {int(row[4]): row[3]},
+                "set": {row[4]+"-"+row[3]}
+            }
+        else:
+            timetable_id[route_id][row[0]]["dic"][int(row[4])] = row[3]
+            timetable_id[route_id][row[0]]["set"].add(row[4]+"-"+row[3])
+
+        ti = row[1].split(':')
+        if int(ti[0]) > 23:
+            dt += datetime.timedelta(days=1)
+        dt = dt.replace(hour=int(ti[0]) % 24, minute=int(ti[1]), second=int(ti[2]), microsecond=0)
+        if row[0] in times:
+            times[row[0]].append((int(row[4]), dt.timestamp()))
+        else:
+            times[row[0]] = [(int(row[4]), dt.timestamp())]
+        if int(ti[0]) > 23:
+            dt -= datetime.timedelta(days=1)
+
+    archive.close()
+    cnt = 0
+    cnt2 = 0
+    for route_id, trips in timetable_id.items():
+        for trip_id_A, data_A in trips.items():
+            if RT.trips[trip_id_A]["timetable_version"] == "":
+                cnt += 1
+                RT.add_timetable(route_id, data_A["dic"], trip_id_A)
+                RT.trips[trip_id_A]["timetable_version"] = trip_id_A
+                for trip_id_B, data_B in trips.items():
+                    if RT.trips[trip_id_B]["timetable_version"] == "" and data_A["set"] == data_B["set"]:
+                        RT.trips[trip_id_B]["timetable_version"] = trip_id_A
+        cnt2 += len(trips)
+
+    print(f"--- {cnt2} trips reduced to {cnt} timetable versions ({round(cnt2/cnt)}:1) ---")
+
+    for trip_id, arrivals in times.items():
+        RT.add_arrival(trip_id, arrivals)
+    RT.clear_arrivals()
+    runningGTFS = 0
     print("--- getGTFS: %s seconds ---" % (time.time() - t))
 
 
-def getStopbyId(stopId):
-    """
-    :param stopId: string
-    :return: pandas.Series, columns: 'stop_id', 'stop_code', 'stop_name', 'stop_desc',
-        'stop_lat', 'stop_lon', 'zone_id', 'stop_url', 'location_type', 'parent_station',
-        'stop_timezone', 'wheelchair_boarding'
-    """
-    try:
-        r = stops.loc[stopId]
-        return r
-    except KeyError as err:
-        logger(f'{getDatetimeNowStr()} <b>getStopbyId({str(stopId)})<\b>\nlen is 0,\ncalling getGTFS()')
-        getGTFS()
-        return getStopbyId(stopId)
-
-
-def getStopByTripSequence(tripId, stopSequence, trial=0):
-    """
-    :param tripId: str
-    :param stopSequence: int
-    :param trial: [Optional] int 0 or 1, if 1 getGTFS will called on KeyError
-    :return: if found a dict: {'stop_id', 'stop_name', 'stop_code'}, if not found None
-    """
-    global stopTdict
-    stopSequenceStr = str(stopSequence)
-    if tripId + '-' + stopSequenceStr in stopTdict:
-        return stopTdict[tripId + '-' + stopSequenceStr]
-    else:
-        try:
-            stopId = stop_times.at[(tripId, stopSequence), 'stop_id']
-        except KeyError as err:
-            if trial == 0:
-                logger(
-                    f'{getDatetimeNowStr()} <b>getStopTimeByTripSequence({str(tripId)},{stopSequenceStr})<\b>\nlen is 0,\ncalling getGTFS()')
-                getGTFS()
-                return getStopByTripSequence(tripId, stopSequence)
-            else:
-                stopTdict[tripId + '-' + stopSequenceStr] = None
-                return None
-
-        s = getStopbyId(stopId)
-        stop = {
-            "stop_id": stopId,
-            "stop_name": s["stop_name"],
-            "stop_code": s["stop_code"]
-        }
-        stopTdict[tripId + '-' + stopSequenceStr] = stop
-        return stop
-
-
-def getRouteIdbyTrip(tripId):
-    """
-    :param tripId: str
-    :return: RouteId as a str
-    """
-    try:
-        r = trips.loc[tripId, ['route_id', 'direction_id']]
-        return r
-    except KeyError as err:
-        logger(
-            f'{getDatetimeNowStr()} <b>getRouteIdbyTrip({tripId})<\b>\ntrips.at[] raised KeyError: {repr(err)},\ncalling getGTFS()')
-        getGTFS()
-        return getRouteIdbyTrip(tripId)
-
-
-def getRouteNamebyId(routeId):
-    """
-    :param routeId: str
-    :return: route_short_name as a str
-    """
-    try:
-        r = routes.at[routeId, 'route_short_name']
-        return r
-    except KeyError as err:
-        logger(
-            f'{getDatetimeNowStr()} <b>getRouteNamebyId({routeId})<\b>\nroutes.at[] raised KeyError: {repr(err)},\ncalling getGTFS()')
-        getGTFS()
-        return getRouteNamebyId(routeId)
-
-
-def getDBconnection():
-    """
-    Connects to the database and load connection and cursor
-    in the global variables db, cr.
-    """
-    global db, cr
-    f = open("mysql.txt", "r")
-    d = f.read().splitlines()
-    f.close()
-    if db is not None:
-        db.close()
-        cr.close()
-    db = mysql.connector.connect(
-        host=d[0],
-        user=d[1],
-        password=d[2],
-        database="gtfs",
-        ssl_ca="DigiCertGlobalRootCA.crt.pem",
-        ssl_verify_cert=True
-    )
-    cr = db.cursor(dictionary=True)
-    cr.execute("SET SESSION MAX_EXECUTION_TIME=60000")
-
-
-def getTtimes(r):
-    # r: {"stop_id", "stop_name", "stop_code", "stop_sequence", "route_id", "direction", "route_short_name", "trip_id", "timestamp"}
-    # ttable[route_id][stop_seq] = ["stop_id", "stop_code", "tm"]
-    ret = []
-    seq = r["stop_sequence"] + 1
-    tm = r["timestamp"]
-    br = 0
-    cont = 0
-    cont2 = 0
-
-    if r["route_id"] in ttable:
-        while br == 0 and cont < 5:
-            cont2 += 1
-            if seq in ttable[r["route_id"]]:
-                stop = getStopByTripSequence(r['trip_id'], seq, 1)
-
-                if stop is not None:
-                    cont = 0
-                    ttablerow = ttable[r["route_id"]][seq]
-                    tm += ttablerow[2]
-                    ret.append({"stop_id": stop["stop_id"], "stop_name": stop['stop_name'],
-                                "stop_code": stop["stop_code"], "stop_sequence": seq, "route_id": r['route_id'],
-                                "direction": r["direction"], "route_short_name": r['route_short_name'],
-                                "trip_id": r['trip_id'], "timestamp": tm})
-                else:
-                    #end of route
-                    br = 1
-            else:
-                cont += 1
-            seq += 1
-
-    return ret
-
-
 def RTmanager(i):
-    if runningRT or runningGetTT:
-        if i != 0 and i % 3 == 0:
-            logger(f'{getDatetimeNowStr()} <b>RTmanager()<\b>\ngetRT didn\'t run for: {i*5+15} seconds')
+    if runningRT or runningGTFS:
+        if i != 0 and i % 10 == 0:
+            logger(f'{getDatetimeNowStr()} <b>RTmanager()<\b>\ngetRT didn\'t run for: {i * 5 + 15} seconds')
         threading.Timer(5, RTmanager, [i + 1]).start()
     else:
         getRT()
 
 
 def getRT():
-    global test, runningRT, stopsRT, routesRT, posRT, logtimesVals, testtableVals
+    global RT, runningRT
     runningRT = 1
     threading.Timer(15, RTmanager, [0]).start()
+
     t = time.time()
     rt = gtfs_realtime_pb2.FeedMessage()
     try:
         response = requests.get('http://percorsieorari.gtt.to.it/das_gtfsrt/trip_update.aspx')
         rt.ParseFromString(response.content)
     except ConnectionError as err:
-        logger(f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
+        logger(
+            f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
+        runningRT = 0
         return 0
     print(getDatetimeNowStr())
     print(f"--- retrieveRT  ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
     t = time.time()
 
-    #For better performance I chose to create a list then converting it in a dataframe
-    # https://stackoverflow.com/a/47979665
-
-    rows = []
-    vals = []
-    testvals = []
-    tr = {}
-
+    ct = 0
     for entity in rt.entity:
         if entity.HasField('trip_update'):
-            routeId, direction = getRouteIdbyTrip(entity.trip_update.trip.trip_id)
-            routeShortName = getRouteNamebyId(routeId)
+            if RT.check_trip(entity.trip_update.trip.trip_id) == 0:
+                logger(
+                    f'{getDatetimeNowStr()} not such trip_id: {entity.trip_update.trip.trip_id},\ncalling getGTFS()')
+                getGTFS()
+                runningRT = 0
+                return 0
+            RT.clear_stop_times(entity.trip_update.trip.trip_id)
+            counter = 0  # used to load only one estimated time, all the other will estimated by the system
+            arrivals = []
             for stopt in entity.trip_update.stop_time_update:
-                stop = getStopByTripSequence(entity.trip_update.trip.trip_id, stopt.stop_sequence)
-
-                if float(stopt.departure.time) >= datetime.datetime.timestamp(datetime.datetime.now()):
-                    if entity.trip_update.trip.trip_id not in tr:
-                        r = {"stop_id": stop["stop_id"], "stop_name": stop['stop_name'],
-                             "stop_code": stop['stop_code'], "stop_sequence": stopt.stop_sequence, "route_id": routeId,
-                             "direction": direction, "route_short_name": routeShortName,
-                             "trip_id": entity.trip_update.trip.trip_id, "timestamp": stopt.departure.time}
-                        rows.append(r)
-                        tr[entity.trip_update.trip.trip_id] = 1
-                        r = getTtimes(r)
-                        rows.extend(r)
-
-                        if len(r) > 0:
-                            index = len(r)//10
-                            q = 1
-                            while q < 10:
-                                test[entity.trip_update.trip.trip_id+'_'+r[index*q]["stop_id"]] = [t, r[index*q]["timestamp"], stopt.stop_sequence]
-                                q += 1
+                if float(stopt.departure.time) >= time.time():
+                    if counter == 0:
+                        RT.set_stop_time(entity.trip_update.trip.trip_id, stopt.stop_sequence, stopt.departure.time, 0)
+                        ct += RT.extend_stop_times(entity.trip_update.trip.trip_id) + 1
+                        counter = 1
                 else:
-                    if entity.trip_update.trip.trip_id in tr:
-                        del tr[entity.trip_update.trip.trip_id]
-                    stop_trip_ts_id = stop['stop_id']+'_'+entity.trip_update.trip.trip_id+'_'+str(stopt.departure.time)
-                    if stop_trip_ts_id not in logtimesVals["set"]:
-                        logtimesVals["set"].add(stop_trip_ts_id)
-                        vals.append((stop['stop_id'], stop['stop_name'], stop['stop_code'], stopt.stop_sequence,
-                                 routeId, routeShortName, entity.trip_update.trip.trip_id, stopt.departure.time, stop_trip_ts_id))
-                    if entity.trip_update.trip.trip_id+'_'+stop['stop_id'] in test:
-                        testvals.append((stop['stop_id'],stop['stop_code'],stopt.stop_sequence,
-                                         routeId,entity.trip_update.trip.trip_id, stopt.departure.time,
-                                         test[entity.trip_update.trip.trip_id+'_'+stop['stop_id']][1],test[entity.trip_update.trip.trip_id+'_'+stop['stop_id']][1]-stopt.departure.time,
-                                         entity.trip_update.trip.trip_id+'_'+stop['stop_id'],test[entity.trip_update.trip.trip_id+'_'+stop['stop_id']][2],
-                                         test[entity.trip_update.trip.trip_id+'_'+stop['stop_id']][0]))
-                        del test[entity.trip_update.trip.trip_id+'_'+stop['stop_id']]
+                    arrivals.append((stopt.stop_sequence, stopt.departure.time))
 
-    # stopsRT is assigned only now, getStopRT calls from telegram can be executed simultaneously with getRT using
-    # the old data
-    if len(rows) > 0:
-        stopsRT = pd.DataFrame(rows).set_index(['stop_code'])
-        routesRT = pd.DataFrame(rows).set_index(['route_id'])
+            if len(arrivals) > 0:
+                RT.add_arrival(entity.trip_update.trip.trip_id, arrivals)
 
-    logtimesVals["list"].extend(vals)
-    testtableVals.extend(testvals)
     t = time.time() - t
     print("\033[96m", end="")
     if t > 10:
         print("\u001b[7m", end="")
-        logger(f"{getDatetimeNowStr()}--- getRT ({len(rows)} items):\t{t} seconds\t---")
-    print(f"--- getRT"+' '*(10-len(str(len(rows))))+f"({len(rows)} items):\t{'{:.5f}'.format(t)} seconds\t---\u001b[0m")
+        logger(f"{getDatetimeNowStr()}--- getRT ({ct} items):\t{t} seconds\t---")
+    print(f"--- getRT" + ' ' * (
+            10 - len(str(ct))) + f"({ct} items):\t{'{:.5f}'.format(t)} seconds\t---\u001b[0m")
     runningRT = 0
     t = time.time()
     try:
@@ -300,76 +394,64 @@ def getRT():
 
     print(f"--- retrievePos ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
     t = time.time()
-    posRT = {}
     for el in rt.entity:
         if el.HasField('vehicle'):
             v = el.vehicle
-            posRT[v.trip.trip_id] = {
-                "route_id": v.trip.route_id,
-                "latitude": v.position.latitude,
-                "longitude": v.position.longitude,
-                "bearing": v.position.bearing,
-                "timestamp": v.timestamp,
-                "label": v.vehicle.label}
+            RT.update_position_trip(v.trip.trip_id, v.position.latitude, v.position.longitude, v.position.bearing, v.timestamp)
 
     print(f"--- getPos      ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
 
 
-def getStopRT(stopCode):
+def getStopRT(stopcode):
     """
-        :param stopCode: str
-        :return: tuple: tuple[0] -1 no data,
-                0 tuple[1] is a Series, 1 tuple[1] is a DataFrame
+        :param stopcode: str
+        :return: tuple: tuple[0] == -1 stopCode does not exists,
+                tuple[0] == 1 -> tuple[1] is a dict
+                key: trip_id-stop_id
+                value: {"trip_id","route_short_name","timestamp","std_dev"}
     """
-    try:
-        s = (0, stopsRT.loc[stopCode])
-        if isinstance(s[1], pd.DataFrame):
-            s = (1, s[1].sort_values(by=['route_short_name', 'timestamp']))
-            s[1].reset_index(drop=True, inplace=True)
-    except KeyError:
-        s = (-1, pd.DataFrame())
+    while runningGTFS or runningRT:
+        time.sleep(0.01)
+
+    if stopcode in RT.stopcodes:
+        s = (1, RT.stops[RT.stopcodes[stopcode]]["stop_times"])
+    else:
+        s = (-1, {})
     return s
 
 
-def getRouteRT(routeId):
+def getRouteRT(route_id):
     """
-        :param routeName: str
-        :return: tuple: tuple[0] -2 route not found, -1 route found but no data,
-                0 tuple[1] is a Series, 1 tuple[1] is a DataFrame
+        :param route_id: str
+        :return: tuple: tuple[0]==-1 route not found,
+                tuple[0]==1 -> tuple[1] is a dict of dicts:
+                key of dict: "trip_id"
+                key of dicts:{"route_id","route_short_name","direction","headsign",
+                "limited","position","stop_times","recent_arrivals"}
     """
-    if routeId not in routes.index:
-        return -2, pd.DataFrame()
-    try:
-        s = (0, routesRT.loc[routeId])
-        if isinstance(s[1], pd.DataFrame):
-            s = (1, s[1].sort_values(by=['trip_id', 'stop_sequence']))
-            s[1].reset_index(drop=True, inplace=True)
-    except KeyError:
-        s = -1, pd.DataFrame()
+    while runningGTFS or runningRT:
+        time.sleep(0.01)
+
+    if route_id not in RT.routes:
+        return -1, []
+    else:
+        s = [1, {}]
+        for trip_id in RT.routes[route_id]["trips"]:
+            s[1][trip_id] = RT.trips[trip_id]
     return s
 
-
-def getTripHeadsign(tripId):
-    """
-        :param tripId: str
-        :return: tuple: tuple[0]: -1 trip not found,
-                0 tuple[1] is a str
-    """
-    return trips.at[tripId, 'trip_headsign']
-
-
+"""
 def getMapRT(tripId):
-    """
+    
         :param tripId: str
         :return: tuple: tuple[0] -1 trip not found,
                 0 tuple[1] is a dict: "route_id", "latitude", "longitude", "bearing", "timestamp", "label"
-    """
+    
     if tripId in posRT:
         pos = posRT[tripId]
         s = (0, pos)
     else:
         s = (-1, pd.DataFrame())
-    """
     BBox = ((7.6267, 7.7070,
              45.0864, 45.0454))
     ruh_m = plt.imread("map.png")
@@ -387,144 +469,22 @@ def getMapRT(tripId):
     plt.savefig(buf, dpi=400, bbox_inches='tight', pad_inches=0)
     buf.seek(0)
     buf.name = 'image.png'
-    """
     return s
+"""
 
+def printer():
+    print(getStopRT("40"))
+    print(getStopRT("3445"))
+    print(getStopRT("471"))
 
-def getTimetable():
-    if runningRT == 1:
-        print(f"--- getTimetable waiting getRT to stop")
-        threading.Timer(5, getTimetable).start()
-        return 0
-    global ttable, logtimesVals, testtableVals, runningGetTT
-    runningGetTT = 1
-    t = time.time()
-    dt = datetime.datetime.now()
-    if dt.minute > 50:
-        dt = dt.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
-    else:
-        dt = dt.replace(minute=0, second=0, microsecond=0)
-    secs = dt.timestamp() - time.time() + 3600
-    print(f"---getTimetable next call in {round(secs)} secs")
-    threading.Timer(round(secs), getTimetable).start()
-
-    hour = dt   #17:14 -> 17:00
-    dt = datetime.date.today()
-    start = dt - datetime.timedelta(days=dt.weekday())  #this monday
-    dt = datetime.time(hour=0, minute=0, second=0)      #00:00:00.0
-    timestamp = int(hour.timestamp() - datetime.datetime.combine(start, dt).timestamp())
-
-    sql = "SELECT route_id,stop_sequence,stop_id,stop_code,AVG(time) as tm " \
-          "FROM weekly_timetable " \
-          "WHERE timestamp_week IN (%s,%s,%s) " \
-          "GROUP BY route_id,stop_sequence,stop_id,stop_code;"
-    adr = (timestamp, timestamp + 3600, timestamp - 3600)
-
-    i = 0
-    while i < 3:
-        try:
-            cr.execute(sql, adr)
-            times = cr.fetchall()
-        except mysql.connector.Error as err:
-            logger(
-                f'{getDatetimeNowStr()} <b>getTimetable()<\b>\nSELECT FROM weekly_timetable' +
-                f' raised: {repr(err)},\ncalling getDBconnection() and retrying, attempt: {i+1}')
-            getDBconnection()
-        else:
-            break
-        i += 1
-    if i == 3:
-        logger(
-            f'{getDatetimeNowStr()} <b>getTimetable()<\b>\nvals cr.execute(), db.commit()' +
-            f' FAILED 3 times aborting')
-        return 0
-
-    dic = {}
-    for el in times:
-        routeId = el["route_id"]
-        stopSequence = el["stop_sequence"]
-        if routeId in dic:
-            if stopSequence in dic[routeId]:
-                #possibili dati su una fermata diversa, ma stesso stop seq per deviazione
-                dic[routeId][stopSequence] = [el["stop_id"], el["stop_code"], (el["tm"]+dic[routeId][stopSequence][2])/2]
-            else:
-                dic[routeId][stopSequence] = [el["stop_id"], el["stop_code"], el["tm"]]
-        else:
-            dic[routeId] = {}
-            dic[routeId][stopSequence] = [el["stop_id"], el["stop_code"], el["tm"]]
-
-    print(f"--- {hour}-{timestamp} : Loaded {len(dic)}/115 routes in ttable in {time.time() - t} seconds")
-    t = time.time()
-
-    ttable = dic
-    logs = logtimesVals["list"]
-    logtimesVals = {"set": set(), "list": []}
-    tests = testtableVals
-    testtableVals = []
-    runningGetTT = 0
-
-    if len(logs) > 0:
-        sql = "INSERT IGNORE INTO logtimes (stop_id,stop_name,stop_code,stop_sequence,route_id,route_short_name,trip_id,timestamp,stop_trip_ts_id)" \
-              " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
-        i = 0
-        while i < 3:
-            try:
-                cr.executemany(sql, logs)
-                db.commit()
-
-                print(f"--- Wrote {len(logs)} elements in logtimes in \t{time.time() - t} seconds")
-                t = time.time()
-            except Exception as err:
-                logger(
-                    f'{getDatetimeNowStr()} <b>getTimetable()<\b>\n INSERT INTO LOGTIMES' +
-                    f' raised: {repr(err)},\ncalling getDBconnection() and retry, attempt: {i + 1}')
-                getDBconnection()
-            else:
-                break
-            i += 1
-        if i == 3:
-            logger(
-                f'{getDatetimeNowStr()} <b>getTimetable()<\b>\nINSERT INTO LOGTIMES of {len(logs)} elements' +
-                f' FAILED 3 times trying next hour')
-
-    if len(tests) > 0:
-        sql = "INSERT INTO test_table (stop_id,stop_code,stop_sequence,route_id,trip_id,timestampreal,timestampmy,difference,testkey,stop_sequence_orig,timestamp_orig,version)" \
-              " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'D')"
-        i = 0
-        while i < 3:
-            try:
-                cr.executemany(sql, tests)
-                db.commit()
-
-                print(f"--- Wrote {len(tests)} elements in test_table in \t{time.time() - t} seconds")
-                t = time.time()
-            except Exception as err:
-                logger(
-                    f'{getDatetimeNowStr()} <b>getTimetable()<\b>\n INSERT INTO TEST_TABLE' +
-                    f' raised: {repr(err)},\ncalling getDBconnection() and retrying, attempt: {i+1}')
-                getDBconnection()
-            else:
-                break
-            i += 1
-        if i == 3:
-            logger(
-                f'{getDatetimeNowStr()} <b>getTimetable()<\b>\nINSERT INTO TEST_TABLE of {len(tests)} elements' +
-                f' FAILED 3 times trying next hour')
-
+    threading.Timer(200, printer).start()
 
 def init(l):
-    global logger, test, ttable, stopsRT, db, stopTdict, runningRT, runningGetTT, logtimesVals, testtableVals
+    global logger, runningRT, runningGTFS
     logger = l
-    test = {}
-    ttable = None
-    stopsRT = None
-    db = None
     runningRT = 0
-    runningGetTT = 0
-    stopTdict = {}
-    logtimesVals = {"set": set(), "list": []}
-    testtableVals = []
-    getDBconnection()
-    getTimetable()
+    runningGTFS = 0
     getGTFS()
     getRT()
+
+#init(print)

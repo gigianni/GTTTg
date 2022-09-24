@@ -4,13 +4,12 @@ import telegram
 
 import main as m
 import datetime as dt
-import pandas as pd
 import threading
 
 from telegram import Update, ForceReply, ParseMode, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
 
-f = open("tg.txt", "r")
+f = open("../tg.txt", "r")
 TOKEN = f.read().rstrip()
 f.close()
 
@@ -45,62 +44,58 @@ def logs_command(update: Update, context: CallbackContext) -> None:
 	f.close()
 
 
-def sendRouteData(chat_id, routeId, tripId=-1):
+def sendRouteData(chat_id, route_id, trip_id='-1'):
 	keyboard = []
-	s = m.getRouteRT(routeId)
-	if s[0] == -2:
+	s = m.getRouteRT(route_id)
+	if s[0] == -1:
 		msg = "Linea non trovata"
-	elif s[0] == -1:
-		msg = "Nessun passaggio previsto"
 	else:
-		if s[0] == 0:
-			msg = f"<b>{s[1].route_short_name}</b>\n"
-			msg += f"{s[1].stop_sequence}\t{s[1].stop_name[8:]} - {dt.datetime.fromtimestamp(s[1].timestamp).strftime('%H:%M')}"
-			tripId = s[1].trip_id
+		if trip_id == '-1':
+			for id, trip in s[1].items():
+				if trip["stop_times_count"] > 0:
+					trip_id = id
+					break
+		if trip_id == '-1':
+			msg = "Nessun passaggio trovato"
 		else:
-			q = s[1].groupby(['trip_id'])["direction"].unique().sort_values()
-			aDir = ""
-			bDir = ""
+			msg = f"<b>Linea {s[1][trip_id]['route_short_name']}</b>\n"
+			if s[1][trip_id]["limited"] == 1:
+				msg += "<b>LIMITATO</b> vedi @gttavvisi\n"
+			msg += f"Posizione aggiornata al " \
+				   f"{dt.datetime.fromtimestamp(m.RT.trips[trip_id]['position']['timestamp']).strftime('%H:%M')}\n"
+
+			for stop_id, stop_time in s[1][trip_id]["stop_times"].items():
+					msg += f"{m.RT.stops[stop_id]['stop_name'][8:]} ({stop_time['stop_sequence']})\n" \
+						   f"\t\t{dt.datetime.fromtimestamp(stop_time['timestamp']).strftime('%H:%M')}" \
+						   f"\t\t\t±{round(stop_time['std_dev'])} sec\n"
+
+
 			i = 1
-			for trip, dir in q.items():
-				if dir == 0:
-					aDir = m.getTripHeadsign(trip)
-					txt = "A - "
-				else:
-					bDir = m.getTripHeadsign(trip)
-					txt = "B - "
-				txt += s[1].loc[s[1]['trip_id'] == trip, "stop_name"].iloc[0].split('-')[1][1:]
-				if not (i-1) % 2:
-					keyboard.append([])
-				keyboard[(i-1)//2].append(InlineKeyboardButton(txt, callback_data=routeId + '-' + trip))
-				i += 1
+			aDir = bDir = ""
+			for id, trip in s[1].items():
+				if trip["stop_times_count"] > 0:
+					if trip["direction"] == 0:
+						txt = "A - "
+						aDir = trip["headsign"]
+					else:
+						txt = "B - "
+						bDir = trip["headsign"]
+					txt += m.RT.stops[next(iter(trip["stop_times"]))]["stop_name"][8:]
+					if not (i - 1) % 2:
+						keyboard.append([])
+					keyboard[(i - 1) // 2].append(InlineKeyboardButton(txt, callback_data=route_id + '_' + trip_id))
+					i += 1
+			if aDir != "":
+				msg += "\nAltri mezzi nel formato <i>Direzione - Prossima fermata</i>, con direzione:\n"
+				msg += f"A: {aDir}\nB: {bDir}"
 
-			if tripId == -1:
-				tripId = q.index[0]
-
-			q = s[1].loc[s[1]['trip_id'] == tripId]
-			if len(q.index) == 0:
-				msg = f"{routeId[:-1]} - <b>Direzione: {m.getTripHeadsign(tripId)} </b>\n\nAL CAPOLINEA"
-			else:
-				msg = f"<b>{q.iat[0,5]} - Direzione: {m.getTripHeadsign(tripId)}</b>\n"
-
-			for index, row in q.iterrows():
-				msg += f"{row.stop_name[8:]}\n\t\t{dt.datetime.fromtimestamp(row.timestamp).strftime('%H:%M')}\n"
-
-			msg += "\nAltri mezzi nel formato <i>Direzione - Prossima fermata</i>, con direzione:\n"
-			if len(aDir) > 0:
-				msg += f"A: {aDir}\n"
-			if len(bDir) > 0:
-				msg += f"B: {bDir}\n"
-
-		s = m.getMapRT(tripId)
-		if s[0] == 0:
-			upd.bot.sendLocation(chat_id=chat_id, location=telegram.Location(longitude=s[1]["longitude"],
-								latitude=s[1]["latitude"], live_period=10, heading=s[1]["bearing"]))
+			position = s[1][trip_id]['position']
+			if position["timestamp"] != 0:
+				upd.bot.sendLocation(chat_id=chat_id, location=telegram.Location(longitude=position["longitude"],
+								latitude=position["latitude"], live_period=10, heading=position["bearing"]))
 
 	reply_markup = InlineKeyboardMarkup(keyboard)
-	if len(msg) != 0:
-		upd.bot.sendMessage(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+	upd.bot.sendMessage(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 
 def texthandler(update: Update, context: CallbackContext) -> None:
@@ -110,26 +105,33 @@ def texthandler(update: Update, context: CallbackContext) -> None:
 		keyboard = []
 		s = m.getStopRT(update.message.text)
 		if s[0] == -1:
+			msg = "Fermata non trovata"
+		elif len(s[1]) == 0:
 			msg = "Nessun arrivo previsto"
-		elif s[0] == 0:
-			msg = s[1].stop_name+"\n"
-			msg += s[1].route_short_name+" - "+dt.datetime.fromtimestamp(s[1].timestamp).strftime("%H:%M")+"\n"
-			keyboard.append([])
-			keyboard[0].append(InlineKeyboardButton("Linea "+s[1].route_short_name, callback_data=s[1].route_id+'-'+s[1].trip_id))
 		else:
-			msg = s[1].iat[0, 1]+"\n"
-			last = -1
+			msg = m.RT.stops[m.RT.stopcodes[update.message.text]]['stop_name']+"\n"
 			i = 0
-			for index, row in s[1].iterrows():
-				if last == -1 or row.route_short_name != last:
-					msg += f"<b>{row.route_short_name}</b>\n"
-					last = row.route_short_name
-					if not i % 3:
-						keyboard.append([])
-					keyboard[i//3].append(
-						InlineKeyboardButton("Linea " + row.route_short_name, callback_data=row.route_id+'-'+row.trip_id))
-					i += 1
-				msg += "\t\t"+dt.datetime.fromtimestamp(row.timestamp).strftime("%H:%M")+"\n"
+			for route_id, route_times in s[1].items():
+				msg += f"<b>{route_times['route_short_name']}</b>\n"
+				if not i % 3:
+					keyboard.append([])
+				keyboard[i//3].append(
+					InlineKeyboardButton("Linea " + route_times["route_short_name"],
+						callback_data=route_id + "_-1"))
+				i += 1
+				times = list(route_times["times"].values())
+				# print in order of timestamp
+				while len(times) != 0:
+					min = 0
+					j = 1
+					while j < len(times):
+						if times[j]["timestamp"] < times[min]["timestamp"]:
+							min = j
+						j += 1
+
+					msg += f"\t\t{dt.datetime.fromtimestamp(times[min]['timestamp']).strftime('%H:%M')}" \
+						   f"\t±{round(times[min]['std_dev'])} sec\n"
+					times.pop(min)
 		reply_markup = InlineKeyboardMarkup(keyboard)
 		update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
@@ -137,9 +139,9 @@ def texthandler(update: Update, context: CallbackContext) -> None:
 def button(update: Update, context: CallbackContext) -> None:
 	query = update.callback_query
 	query.answer()
-	routeId, tripId = query.data.split('-')[0], query.data.split('-')[1]
+	routeId, tripId = query.data.split('_')[0], query.data.split('_')[1]
 
-	sendRouteData(query.message.chat_id,routeId, tripId)
+	sendRouteData(query.message.chat_id, routeId, tripId)
 
 
 upd = None
