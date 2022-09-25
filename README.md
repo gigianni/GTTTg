@@ -1,5 +1,6 @@
 # GTTtg
 ## _Bringing GTFS realtime to Telegram_
+
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-blue.svg?logo=telegram)](https://t.me/gtt_tgbot)
 
 GTTtg use data from [aperTO](http://aperto.comune.torino.it) for a simple Telegram bot that can show the real time arrivals of public transport of the city of Turin.
@@ -7,13 +8,16 @@ GTTtg use data from [aperTO](http://aperto.comune.torino.it) for a simple Telegr
 The two dataset used can be found at [GTFS](http://aperto.comune.torino.it/dataset/feed-gtfs-trasporti-gtt) and [GTFS-RealTime](http://aperto.comune.torino.it/dataset/feed-gtfs-real-time-trasporti-gtt).
 
 #[The telegram bot](https://t.me/gtt_tgbot)
-The bot is right now very simple, it can be used by sending him the code of a stop like shown below: 
+The bot is right now very simple, it can be used by sending him the code of a stop like shown below:
+
 ![Telegram Stop](https://raw.githubusercontent.com/gigianni/GTTTg/main/img/tg_stop.png)
 
-The bot will reply with all the estimated arrivals at that stop grouped by route number, at the end of the message users can find buttons for all the routes that are expected to arrive at the stop, by clicking on them the user will receive the position of the first trip and the list of his next stops:  
+The bot will reply with all the estimated arrivals at that stop grouped by route number, at the end of the message users can find buttons for all the routes that are expected to arrive at the stop, by clicking on them the user will receive the position of the first trip and the list of his next stops:
+
 ![Telegram Route](https://raw.githubusercontent.com/gigianni/GTTTg/main/img/tg_route.png)
 
 #The RT class datastructure
+
 All the structures are implemented with standard Python structure, usually dicts of dicts.
 
 The function getGTFS() loads all the static part, indicated with a grey background in the picture shown below.
@@ -44,6 +48,7 @@ To run it you just need the tg.py, main.py and a file named tg.txt with the Toke
     --- getRT      (2812 items):	0.23341 seconds	---
     --- retrievePos (114 items):	0.97912 seconds	---
     --- getPos      (114 items):	0.00000 seconds	---
+
 # Performance
 
 With the new version performance was a goal for me, especially regarding memory consumption because the project is running on a student free tier vps with only 1GB of RAM.
