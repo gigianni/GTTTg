@@ -1,4 +1,4 @@
-# TO-DO: from stoprt to routert with trip
+# TO-DO:
 
 import collections
 import csv
@@ -233,7 +233,7 @@ def getDatetimeNowStr():
     """
     return datetime.datetime.now().strftime("%d/%m/%y %H:%M:%S")
 
-@profile
+
 def getGTFS():
     """
         Retrieve GTFS data from "https://www.gtt.to.it/open_data/gtt_gtfs.zip"
@@ -337,7 +337,7 @@ def getGTFS():
                     if RT.trips[trip_id_B]["timetable_version"] == "" and data_A["set"] == data_B["set"]:
                         RT.trips[trip_id_B]["timetable_version"] = trip_id_A
         cnt2 += len(trips)
-    #timetable_id = {}
+
     del timetable_id
     print(f"--- {cnt2} trips reduced to {cnt} timetable versions ({round(cnt2/cnt)}:1) ---")
 
@@ -355,7 +355,6 @@ def RTmanager(i):
         threading.Timer(5, RTmanager, [i + 1]).start()
     else:
         getRT()
-
 
 def getRT():
     global RT, runningRT
@@ -507,7 +506,7 @@ def printer():
 
     threading.Timer(200, printer).start()
 
-@profile
+
 def init(l):
     global logger, runningRT, runningGTFS
     logger = l
@@ -516,4 +515,4 @@ def init(l):
     getGTFS()
     getRT()
 
-init(print)
+#init(print)
