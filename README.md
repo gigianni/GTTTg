@@ -7,16 +7,17 @@ GTTtg use data from [aperTO](http://aperto.comune.torino.it) for a simple Telegr
 
 The two dataset used can be found at [GTFS](http://aperto.comune.torino.it/dataset/feed-gtfs-trasporti-gtt) and [GTFS-RealTime](http://aperto.comune.torino.it/dataset/feed-gtfs-real-time-trasporti-gtt).
 
-#[The telegram bot](https://t.me/gtt_tgbot)
+# [The telegram bot](https://t.me/gtt_tgbot)
+
 The bot is right now very simple, it can be used by sending him the code of a stop like shown below:
 
-![Telegram Stop](https://raw.githubusercontent.com/gigianni/GTTTg/main/img/tg_stop.png)
+<img src="https://raw.githubusercontent.com/gigianni/GTTTg/main/img/tg_stop.png" width=450px />
 
 The bot will reply with all the estimated arrivals at that stop grouped by route number, at the end of the message users can find buttons for all the routes that are expected to arrive at the stop, by clicking on them the user will receive the position of the first trip and the list of his next stops:
 
-![Telegram Route](https://raw.githubusercontent.com/gigianni/GTTTg/main/img/tg_route.png)
+<img src="https://raw.githubusercontent.com/gigianni/GTTTg/main/img/tg_route.png" width=450px />
 
-#The RT class datastructure
+# The RT class datastructure
 
 All the structures are implemented with standard Python structure, usually dicts of dicts.
 
