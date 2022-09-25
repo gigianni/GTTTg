@@ -1,4 +1,4 @@
-# TO-DO:
+# TO-DO: from stoprt to routert with trip
 
 import collections
 import csv
@@ -122,7 +122,30 @@ class RealTimeData:
                 count += 1
             i += 1
 
-    def clear_stop_times(self, trip_id):
+    def check_trip_stop_times(self, updated_trips):
+        """
+        Iterates every trip exluding the one given in updated_trips and checks delete the whole stop_times if they are
+        all prior to now
+        :param updated_trips: a Set() containing the trips NOT to be checked:
+        :return:
+        """
+        now = time.time()
+        for trip_id, trip in self.trips.items():
+            if trip_id not in updated_trips:
+                delete = True
+                for stop_id, stoptime in trip["stop_times"].items():
+                    if stoptime["timestamp"] >= now:
+                        delete = False
+                        break
+                if delete:
+                    self.clear_trip_stop_times(trip_id)
+
+    def clear_trip_stop_times(self, trip_id):
+        """
+            Deletes every instance of every stop_time of a given trip
+            :param trip_id: str
+            :return:
+        """
         route_id = self.trips[trip_id]["route_id"]
         for stop_id in self.trips[trip_id]["stop_times"]:
             del self.stops[stop_id]["stop_times"][route_id]["times"][trip_id + "-" + stop_id]
@@ -210,7 +233,7 @@ def getDatetimeNowStr():
     """
     return datetime.datetime.now().strftime("%d/%m/%y %H:%M:%S")
 
-
+@profile
 def getGTFS():
     """
         Retrieve GTFS data from "https://www.gtt.to.it/open_data/gtt_gtfs.zip"
@@ -231,7 +254,6 @@ def getGTFS():
 
     print("--- retrieveGTFS: %s seconds ---" % (time.time() - t))
     t = time.time()
-
     global RT
     RT = RealTimeData()
 
@@ -252,6 +274,7 @@ def getGTFS():
         # "route_id","service_id","trip_id","trip_headsign","trip_short_name","direction_id","block_id","shape_id","wheelchair_accessible","bikes_allowed","limited_route"
         # passed to RT "trip_id", "route_id", "direction_id", "trip_headsign", "limited_route"
         RT.add_trip(row[2], row[0], int(row[5]), row[3], int(row[10]))
+
 
     s = archive.read('stop_times.txt').decode("utf-8").splitlines()[1:]
     times = {}
@@ -301,6 +324,7 @@ def getGTFS():
             dt -= datetime.timedelta(days=1)
 
     archive.close()
+
     cnt = 0
     cnt2 = 0
     for route_id, trips in timetable_id.items():
@@ -313,7 +337,8 @@ def getGTFS():
                     if RT.trips[trip_id_B]["timetable_version"] == "" and data_A["set"] == data_B["set"]:
                         RT.trips[trip_id_B]["timetable_version"] = trip_id_A
         cnt2 += len(trips)
-
+    #timetable_id = {}
+    del timetable_id
     print(f"--- {cnt2} trips reduced to {cnt} timetable versions ({round(cnt2/cnt)}:1) ---")
 
     for trip_id, arrivals in times.items():
@@ -352,6 +377,7 @@ def getRT():
     t = time.time()
 
     ct = 0
+    updated_trips = set()
     for entity in rt.entity:
         if entity.HasField('trip_update'):
             if RT.check_trip(entity.trip_update.trip.trip_id) == 0:
@@ -360,7 +386,8 @@ def getRT():
                 getGTFS()
                 runningRT = 0
                 return 0
-            RT.clear_stop_times(entity.trip_update.trip.trip_id)
+            updated_trips.add(entity.trip_update.trip.trip_id)
+            RT.clear_trip_stop_times(entity.trip_update.trip.trip_id)
             counter = 0  # used to load only one estimated time, all the other will estimated by the system
             arrivals = []
             for stopt in entity.trip_update.stop_time_update:
@@ -375,6 +402,7 @@ def getRT():
             if len(arrivals) > 0:
                 RT.add_arrival(entity.trip_update.trip.trip_id, arrivals)
 
+    RT.check_trip_stop_times(updated_trips)
     t = time.time() - t
     print("\033[96m", end="")
     if t > 10:
@@ -479,6 +507,7 @@ def printer():
 
     threading.Timer(200, printer).start()
 
+@profile
 def init(l):
     global logger, runningRT, runningGTFS
     logger = l
@@ -487,4 +516,4 @@ def init(l):
     getGTFS()
     getRT()
 
-#init(print)
+init(print)

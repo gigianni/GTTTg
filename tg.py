@@ -117,7 +117,7 @@ def texthandler(update: Update, context: CallbackContext) -> None:
 					keyboard.append([])
 				keyboard[i//3].append(
 					InlineKeyboardButton("Linea " + route_times["route_short_name"],
-						callback_data=route_id + "_-1"))
+						callback_data=route_id + "_" + next(iter(route_times["times"])).split('-')[0]))
 				i += 1
 				times = list(route_times["times"].values())
 				# print in order of timestamp
