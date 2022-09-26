@@ -59,4 +59,4 @@ Beside that while operating normally the memory consumption is under 600MB, you 
 For treating the stop_times calculations I've chosen to group the trips of the same route in versions, every version has the same sequence of stops, in this way different trips can share their data and have a richier dataset from which calculate the mean times and there's also less data consumption (every version refers to 41 trips on average).
 
 Performance on my server, even at peak hour, is good as you can se below, the getGTFS part is really slow for the memory issues, on another machine it takes around 10 seconds.
-[!Performance picture]()
+[!Performance picture](https://raw.githubusercontent.com/gigianni/GTTTg/main/img/performance.png)
