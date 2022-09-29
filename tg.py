@@ -83,7 +83,7 @@ def sendRouteData(chat_id, route_id, trip_id='-1'):
 					txt += m.RT.stops[next(iter(trip["stop_times"]))]["stop_name"][8:]
 					if not (i - 1) % 2:
 						keyboard.append([])
-					keyboard[(i - 1) // 2].append(InlineKeyboardButton(txt, callback_data=route_id + '_' + trip_id))
+					keyboard[(i - 1) // 2].append(InlineKeyboardButton(txt, callback_data=route_id + '_' + id))
 					i += 1
 			if aDir != "":
 				msg += "\nAltri mezzi nel formato <i>Direzione - Prossima fermata</i>, con direzione:\n"
