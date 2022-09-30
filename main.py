@@ -10,6 +10,7 @@ import time
 import zipfile
 import requests
 from google.transit import gtfs_realtime_pb2
+import json
 
 global logger, runningRT, runningGTFS, RT
 
@@ -65,9 +66,9 @@ class RealTimeData:
         self.trips[data["trip_id"]] = {
             "route_id": data["route_id"],
             "route_short_name": self.routes[data["route_id"]]["route_short_name"],
-            "direction": data["direction_id"],
+            "direction": int(data["direction_id"]),
             "headsign": data["trip_headsign"],
-            "limited": data["limited_route"],
+            "limited": int(data["limited_route"]),
             "position": {
                 "latitude": None,
                 "longitude": None,
@@ -119,6 +120,8 @@ class RealTimeData:
                     "times": [],
                     "mean": 0,
                     "var": 0,
+                    "sum": 0,
+                    "sum_sqrd": 0,
                     "N": 0,
                     "std_dev": 0
                 }
@@ -208,25 +211,61 @@ class RealTimeData:
             timetable["times"].append(timedelta)
 
             oldmean = timetable["mean"]
+            timetable["sum"] += timedelta
+            timetable["sum_sqrd"] += timedelta * timedelta
             N = timetable["N"]
-
             if N == 0:
                 timetable["mean"] = timedelta
                 timetable["var"] = 0
                 timetable["N"] = 1
             else:
                 timetable["mean"] += (timedelta - oldmean) / (N + 1)
-                timetable["var"] = ((N - 1) * timetable["var"] + (timedelta - timetable["mean"]) * (
-                        timedelta - oldmean)) / N
-                if N >= 15:
-                    # max 15 entries in times, the oldest will be deleted
+                if N >= 30:
+                    # max 30 entries in times
+                    timetable["sum"] -= timetable["times"][0]
+                    timetable["sum_sqrd"] -= timetable["times"][0] * timetable["times"][0]
                     timetable["mean"] += (timetable["mean"] - timetable["times"][0])/N
-                    timetable["var"] = ((N - 2) * timetable["var"] + (timetable["times"][0] - timetable["mean"]) * (
-                            timetable["times"][0] - oldmean)) / (N - 1)
                     timetable["times"].pop(0)
                 else:
                     timetable["N"] += 1
+
+                timetable["var"] = (timetable["sum_sqrd"] / timetable["N"]) - (timetable["sum"] * timetable["sum"]) / \
+                                                                                 (timetable["N"] * timetable["N"])
+
             timetable["std_dev"] = math.sqrt(timetable["var"])
+
+    def timetable_outliers_cleaner(self):
+        cnt = 0
+        for route_id, route in self.routes.items():
+            for id, version in route["timetable"].items():
+                for stop_id, timetable in version.items():
+                    if timetable["N"] == 30:
+                        q = 20
+                        s = sorted(timetable["times"][0:q])
+                        q1 = s[5]
+                        q3 = s[15]
+                        for time in s:
+                            if time < q1 - 1.5*(q3-q1) or time > q3 + 1.5*(q3+q1):
+                                timetable["sum"] -= time
+                                timetable["sum_sqrd"] -= time * time
+                                timetable["mean"] += (timetable["mean"] - time) / timetable["N"]
+                                timetable["times"].remove(time)
+                                timetable["N"] -= 1
+                                timetable["var"] = (timetable["sum_sqrd"] / timetable["N"]) - (timetable["sum"] * timetable["sum"]) / \
+                                                   (timetable["N"] * timetable["N"])
+                                timetable["std_dev"] = math.sqrt(timetable["var"])
+                                cnt += 1
+
+        return cnt
+
+    def to_JSON(self):
+        global runningRT
+        runningRT = 1
+        ret = json.dumps(self, default=lambda o: o.__dict__,
+                          sort_keys=True, indent=4)
+        runningRT = 0
+        return ret
+
 
 
 def getDatetimeNowStr():
@@ -247,10 +286,12 @@ def getGTFS():
     t = time.time()
     p = 'https://www.gtt.to.it/open_data/gtt_gtfs.zip'
 
-    r = requests.get(p)
-    if not r.ok:
-        logger(f'{getDatetimeNowStr()} <b>getGTFS()<\b>\n error retrieving gtt_gtfs.zip,'
+    try:
+        r = requests.get(p)
+    except Exception as err:
+        logger(f'{getDatetimeNowStr()} <b>getGTFS()<\b>\n error retrieving gtt_gtfs.zip {repr(err)}'
                f'\n calling getGTFS()')
+        time.sleep(10)
         getGTFS()
 
     archive = zipfile.ZipFile(io.BytesIO(r.content))
@@ -396,30 +437,30 @@ def getGTFS():
 
     for trip_id, arrivals in times.items():
         RT.add_arrival(trip_id, arrivals)
-    RT.clear_arrivals()
+    #|RT.clear_arrivals()
     runningGTFS = 0
     print("--- getGTFS: %s seconds ---" % (time.time() - t))
 
 
-def RTmanager(i):
+def RTmanager(i, runCounter):
     if runningRT or runningGTFS:
         if i != 0 and i % 10 == 0:
             logger(f'{getDatetimeNowStr()} <b>RTmanager()<\b>\ngetRT didn\'t run for: {i * 5 + 15} seconds')
-        threading.Timer(5, RTmanager, [i + 1]).start()
+        threading.Timer(5, RTmanager, [i + 1, runCounter]).start()
     else:
-        getRT()
+        getRT(runCounter)
 
-def getRT():
+def getRT(runCounter):
     global RT, runningRT
     runningRT = 1
-    threading.Timer(15, RTmanager, [0]).start()
+    threading.Timer(15, RTmanager, [0, runCounter + 1]).start()
 
     t = time.time()
     rt = gtfs_realtime_pb2.FeedMessage()
     try:
         response = requests.get('http://percorsieorari.gtt.to.it/das_gtfsrt/trip_update.aspx')
         rt.ParseFromString(response.content)
-    except ConnectionError as err:
+    except Exception as err:
         logger(
             f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
         runningRT = 0
@@ -462,7 +503,6 @@ def getRT():
         logger(f"{getDatetimeNowStr()}--- getRT ({ct} items):\t{t} seconds\t---")
     print(f"--- getRT" + ' ' * (
             10 - len(str(ct))) + f"({ct} items):\t{'{:.5f}'.format(t)} seconds\t---\u001b[0m")
-    runningRT = 0
     t = time.time()
     try:
         response = requests.get('http://percorsieorari.gtt.to.it/das_gtfsrt/vehicle_position.aspx')
@@ -480,6 +520,11 @@ def getRT():
             RT.update_position_trip(v.trip.trip_id, v.position.latitude, v.position.longitude, v.position.bearing, v.timestamp)
 
     print(f"--- getPos      ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
+    if runCounter != 0 and runCounter % 20 == 0:
+        t = time.time()
+        cnt = RT.timetable_outliers_cleaner()
+        print(f"--- cleaned outliers      ({cnt} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
+    runningRT = 0
 
 
 def getStopRT(stopcode):
@@ -566,6 +611,6 @@ def init(l):
     runningRT = 0
     runningGTFS = 0
     getGTFS()
-    getRT()
+    getRT(0)
 
 #init(print)
