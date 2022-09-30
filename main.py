@@ -23,18 +23,21 @@ class RealTimeData:
         self.routes = {}
         self.stopcodes = {}
 
-    def add_stop(self, stop_id, stop_name, stop_code):
+    def add_stop(self, data):
         """Adds a stop, stop["stop_times"] is a dict with trip_id+"-"+stop_id as keys"""
-        self.stops[stop_id] = {
-            "stop_name": stop_name,
-            "stop_code": stop_code,
+        self.stops[data["stop_id"]] = {
+            "stop_name": data["stop_name"],
+            "stop_code": data["stop_code"],
+            "stop_desc": data["stop_desc"],
+            "stop_lat": data["stop_lat"],
+            "stop_lon": data["stop_lon"],
             "stop_times": {}
         }
-        self.stopcodes[stop_code] = stop_id
+        self.stopcodes[data["stop_code"]] = data["stop_id"]
 
-    def add_route(self, route_id, route_short_name):
-        self.routes[route_id] = {
-            "route_short_name": route_short_name,
+    def add_route(self, data):
+        self.routes[data["route_id"]] = {
+            "route_short_name": data["route_short_name"],
             "trips": {},
             "timetable": collections.OrderedDict()
         }
@@ -58,13 +61,13 @@ class RealTimeData:
             return self.trips[trip_id]
         return None
 
-    def add_trip(self, trip_id, route_id, direction, headsign, limited):
-        self.trips[trip_id] = {
-            "route_id": route_id,
-            "route_short_name": self.routes[route_id]["route_short_name"],
-            "direction": direction,
-            "headsign": headsign,
-            "limited": limited,
+    def add_trip(self, data):
+        self.trips[data["trip_id"]] = {
+            "route_id": data["route_id"],
+            "route_short_name": self.routes[data["route_id"]]["route_short_name"],
+            "direction": data["direction_id"],
+            "headsign": data["trip_headsign"],
+            "limited": data["limited_route"],
             "position": {
                 "latitude": None,
                 "longitude": None,
@@ -76,7 +79,7 @@ class RealTimeData:
             "recent_arrivals": {},
             "timetable_version": ""
         }
-        self.routes[route_id]["trips"][trip_id] = self.trips[trip_id]
+        self.routes[data["route_id"]]["trips"][data["trip_id"]] = self.trips[data["trip_id"]]
 
     def update_position_trip(self, trip_id, latitude, longitude, bearing, timestamp):
         self.trips[trip_id]["position"]["latitude"] = latitude
@@ -257,26 +260,63 @@ def getGTFS():
     global RT
     RT = RealTimeData()
 
-    s = archive.read('stops.txt').decode("utf-8").splitlines()[1:]
+    s = archive.read('stops.txt').decode("utf-8").splitlines()
+    data = {}
+    key_index = []
+    firstRow = True
+
     for row in csv.reader(s, quotechar='"', delimiter=',', quoting=csv.QUOTE_ALL, skipinitialspace=True):
         # "stop_id", "stop_code", "stop_name", "stop_desc", "stop_lat", "stop_lon", "zone_id", "stop_url", "location_type", "parent_station", "stop_timezone", "wheelchair_boarding"
-        # passed to RT "stop_id", "stop_name", "stop_code"
-        RT.add_stop(row[0], row[2], row[1])
+        if firstRow:
+            firstRow = False
+            for el in row:
+                data[el] = ""
+                key_index.append(el)
+        else:
+            i = 0
+            for el in row:
+                data[key_index[i]] = el
+                i += 1
+            RT.add_stop(data)
 
-    s = archive.read('routes.txt').decode("utf-8").splitlines()[1:]
+    s = archive.read('routes.txt').decode("utf-8").splitlines()
+    data = {}
+    key_index = []
+    firstRow = True
     for row in csv.reader(s, quotechar='"', delimiter=',', quoting=csv.QUOTE_ALL, skipinitialspace=True):
         # "route_id", "agency_id", "route_short_name", "route_long_name", "route_desc", "route_type", "route_url", "route_color", "route_text_color", "route_sort_order"
-        # passed to RT "route_id", "route_short_name"
-        RT.add_route(row[0], row[2])
+        if firstRow:
+            firstRow = False
+            for el in row:
+                data[el] = ""
+                key_index.append(el)
+        else:
+            i = 0
+            for el in row:
+                data[key_index[i]] = el
+                i += 1
+            RT.add_route(data)
 
-    s = archive.read('trips.txt').decode("utf-8").splitlines()[1:]
+    s = archive.read('trips.txt').decode("utf-8").splitlines()
+    data = {}
+    key_index = []
+    firstRow = True
     for row in csv.reader(s, quotechar='"', delimiter=',', quoting=csv.QUOTE_ALL, skipinitialspace=True):
         # "route_id","service_id","trip_id","trip_headsign","trip_short_name","direction_id","block_id","shape_id","wheelchair_accessible","bikes_allowed","limited_route"
-        # passed to RT "trip_id", "route_id", "direction_id", "trip_headsign", "limited_route"
-        RT.add_trip(row[2], row[0], int(row[5]), row[3], int(row[10]))
+        if firstRow:
+            firstRow = False
+            for el in row:
+                data[el] = ""
+                key_index.append(el)
+        else:
+            i = 0
+            for el in row:
+                data[key_index[i]] = el
+                i += 1
+            RT.add_trip(data)
 
 
-    s = archive.read('stop_times.txt').decode("utf-8").splitlines()[1:]
+    s = archive.read('stop_times.txt').decode("utf-8").splitlines()
     times = {}
     dt = datetime.datetime.now()
     timetable_id = {}
@@ -292,36 +332,49 @@ def getGTFS():
        }, ...
     }
     """
+    data = {}
+    key_index = []
+    firstRow = True
     for row in csv.reader(s, quotechar='"', delimiter=',', quoting=csv.QUOTE_ALL, skipinitialspace=True):
         # "trip_id","arrival_time","departure_time","stop_id","stop_sequence","stop_headsign","pickup_type","drop_off_type","shape_dist_traveled","timepoint"
-        # passed to RT "trip_id", "stop_sequence", "stop_id"
-        route_id = RT.trips[row[0]]["route_id"]
-
-        if route_id not in timetable_id:
-            timetable_id[route_id] = {}
-            timetable_id[route_id][row[0]] = {
-                "dic": {int(row[4]): row[3]},
-                "set": {row[4]+"-"+row[3]}
-            }
-        elif row[0] not in timetable_id[route_id]:
-            timetable_id[route_id][row[0]] = {
-                "dic": {int(row[4]): row[3]},
-                "set": {row[4]+"-"+row[3]}
-            }
+        if firstRow:
+            firstRow = False
+            for el in row:
+                data[el] = ""
+                key_index.append(el)
         else:
-            timetable_id[route_id][row[0]]["dic"][int(row[4])] = row[3]
-            timetable_id[route_id][row[0]]["set"].add(row[4]+"-"+row[3])
+            i = 0
+            for el in row:
+                data[key_index[i]] = el
+                i += 1
 
-        ti = row[1].split(':')
-        if int(ti[0]) > 23:
-            dt += datetime.timedelta(days=1)
-        dt = dt.replace(hour=int(ti[0]) % 24, minute=int(ti[1]), second=int(ti[2]), microsecond=0)
-        if row[0] in times:
-            times[row[0]].append((int(row[4]), dt.timestamp()))
-        else:
-            times[row[0]] = [(int(row[4]), dt.timestamp())]
-        if int(ti[0]) > 23:
-            dt -= datetime.timedelta(days=1)
+            route_id = RT.trips[data["trip_id"]]["route_id"]
+
+            if route_id not in timetable_id:
+                timetable_id[route_id] = {}
+                timetable_id[route_id][data["trip_id"]] = {
+                    "dic": {int(data["stop_sequence"]): data["stop_id"]},
+                    "set": {data["stop_sequence"]+"-"+data["stop_id"]}
+                }
+            elif data["trip_id"] not in timetable_id[route_id]:
+                timetable_id[route_id][data["trip_id"]] = {
+                    "dic": {int(data["stop_sequence"]): data["stop_id"]},
+                    "set": {data["stop_sequence"]+"-"+data["stop_id"]}
+                }
+            else:
+                timetable_id[route_id][data["trip_id"]]["dic"][int(data["stop_sequence"])] = data["stop_id"]
+                timetable_id[route_id][data["trip_id"]]["set"].add(data["stop_sequence"]+"-"+data["stop_id"])
+
+            ti = data["arrival_time"].split(':')
+            if int(ti[0]) > 23:
+                dt += datetime.timedelta(days=1)
+            dt = dt.replace(hour=int(ti[0]) % 24, minute=int(ti[1]), second=int(ti[2]), microsecond=0)
+            if data["trip_id"] in times:
+                times[data["trip_id"]].append((int(data["stop_sequence"]), dt.timestamp()))
+            else:
+                times[data["trip_id"]] = [(int(data["stop_sequence"]), dt.timestamp())]
+            if int(ti[0]) > 23:
+                dt -= datetime.timedelta(days=1)
 
     archive.close()
 
@@ -441,7 +494,7 @@ def getStopRT(stopcode):
         time.sleep(0.01)
 
     if stopcode in RT.stopcodes:
-        s = (1, RT.stops[RT.stopcodes[stopcode]]["stop_times"])
+        s = (1, RT.stops[RT.stopcodes[stopcode]])
     else:
         s = (-1, {})
     return s
