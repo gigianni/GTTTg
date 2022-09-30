@@ -4,6 +4,7 @@ import telegram
 
 import main as m
 import datetime as dt
+import io
 import threading
 
 from telegram import Update, ForceReply, ParseMode, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -42,6 +43,13 @@ def logs_command(update: Update, context: CallbackContext) -> None:
 	lines = f.read().splitlines()
 	update.message.reply_text('\n'.join(lines[-20:]))
 	f.close()
+
+
+def json_command(update: Update, context: CallbackContext) -> None:
+	f = open("RT.json", "w")
+	f.write(m.RT.to_JSON())
+	f.close()
+	update.message.reply_text('Done')
 
 
 def sendRouteData(chat_id, route_id, trip_id='-1'):
@@ -85,7 +93,7 @@ def sendRouteData(chat_id, route_id, trip_id='-1'):
 						keyboard.append([])
 					keyboard[(i - 1) // 2].append(InlineKeyboardButton(txt, callback_data=route_id + '_' + id))
 					i += 1
-			if aDir != "":
+			if aDir != "" or bDir != "":
 				msg += "\nAltri mezzi nel formato <i>Direzione - Prossima fermata</i>, con direzione:\n"
 				msg += f"A: {aDir}\nB: {bDir}"
 
@@ -106,13 +114,13 @@ def texthandler(update: Update, context: CallbackContext) -> None:
 		s = m.getStopRT(update.message.text)
 		if s[0] == -1:
 			msg = "Fermata non trovata"
-		elif len(s[1]) == 0:
+		elif len(s[1]["stop_times"]) == 0:
 			msg = "Nessun arrivo previsto"
 		else:
-			msg = m.RT.stops[m.RT.stopcodes[update.message.text]]['stop_name']+"\n"
+			msg = f"<b>{s[1]['stop_name']}</b>\n{s[1]['stop_desc']}\n"
 			i = 0
-			for route_id, route_times in s[1].items():
-				msg += f"<b>{route_times['route_short_name']}</b>\n"
+			for route_id, route_times in s[1]["stop_times"].items():
+				msg += f"\n<b>{route_times['route_short_name']}</b>\n"
 				if not i % 3:
 					keyboard.append([])
 				keyboard[i//3].append(
@@ -133,6 +141,8 @@ def texthandler(update: Update, context: CallbackContext) -> None:
 						   f"\t±{round(times[min]['std_dev'])} sec\n"
 					times.pop(min)
 		reply_markup = InlineKeyboardMarkup(keyboard)
+		upd.bot.sendLocation(chat_id=update.message.chat_id, location=telegram.Location(longitude=s[1]["stop_lon"],
+																		 latitude=s[1]["stop_lat"]))
 		update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 
@@ -154,6 +164,7 @@ def main() -> None:
 	dispatcher.add_handler(CommandHandler("start", start))
 	dispatcher.add_handler(CommandHandler("help", help_command))
 	dispatcher.add_handler(CommandHandler("logs", logs_command, Filters.chat(chat_id=84266954)))
+	dispatcher.add_handler(CommandHandler("json", json_command, Filters.chat(chat_id=84266954)))
 	dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, texthandler))
 	updater.dispatcher.add_handler(CallbackQueryHandler(button))
 
