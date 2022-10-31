@@ -1,4 +1,4 @@
-# TO-DO:
+# TO-DO: too much wauting flag, check tumestsmp deleter
 
 import collections
 import csv
@@ -12,7 +12,7 @@ import requests
 from google.transit import gtfs_realtime_pb2
 import json
 
-global logger, runningRT, runningGTFS, RT
+global logger, runningRT, runningGTFS, modifyingRT, RT
 
 
 class RealTimeData:
@@ -39,7 +39,8 @@ class RealTimeData:
     def add_route(self, data):
         self.routes[data["route_id"]] = {
             "route_short_name": data["route_short_name"],
-            "trips": {},
+            "trips": set(),
+            "active_trips": set(),
             "timetable": collections.OrderedDict()
         }
 
@@ -47,7 +48,7 @@ class RealTimeData:
         for stop_time in self.trips[trip_id]["stop_times"]:
             del self.stops[stop_time["stop_id"]]["stop_times"][trip_id + "-" + stop_time["stop_id"]]
 
-        del self.routes[self.trips[trip_id]["route_id"]]["trips"][trip_id]
+        self.routes[self.trips[trip_id]["route_id"]]["trips"].remove(trip_id)
         del self.trips[trip_id]
 
     def check_trip(self, trip_id):
@@ -58,9 +59,25 @@ class RealTimeData:
             return 0
 
     def get_trip(self, trip_id):
+        """
+        Return the request trip if exists or None if not exists
+        :param trip_id: str
+        :return:
+        """
         if trip_id in self.trips:
             return self.trips[trip_id]
         return None
+
+    def get_stop_from_stopcode(self, stop_code):
+        """
+        Return the request stop if exists or None if not exists
+        :param stop_code: str
+        :return:
+        """
+        if stop_code in self.stopcodes:
+            return self.stops[self.stopcodes[stop_code]]
+        else:
+            return None
 
     def add_trip(self, data):
         self.trips[data["trip_id"]] = {
@@ -80,7 +97,7 @@ class RealTimeData:
             "recent_arrivals": {},
             "timetable_version": ""
         }
-        self.routes[data["route_id"]]["trips"][data["trip_id"]] = self.trips[data["trip_id"]]
+        self.routes[data["route_id"]]["trips"].add(data["trip_id"])
 
     def update_position_trip(self, trip_id, latitude, longitude, bearing, timestamp):
         self.trips[trip_id]["position"]["latitude"] = latitude
@@ -92,6 +109,7 @@ class RealTimeData:
         self.trips[trip_id]["stop_times_count"] += 1
         version = self.trips[trip_id]["timetable_version"]
         route_id = self.trips[trip_id]["route_id"]
+        self.routes[route_id]["active_trips"].add(trip_id)
         stop_id = self.routes[route_id]["timetable"][version][stop_sequence]["stop_id"]
         self.trips[trip_id]["stop_times"][stop_id] = {
             "stop_sequence": stop_sequence,
@@ -130,7 +148,7 @@ class RealTimeData:
 
     def check_trip_stop_times(self, updated_trips):
         """
-        Iterates every trip exluding the one given in updated_trips and checks delete the whole stop_times if they are
+        Iterates every trip excluding the one given in updated_trips and checks delete the whole stop_times if they are
         all prior to now
         :param updated_trips: a Set() containing the trips NOT to be checked:
         :return:
@@ -145,6 +163,7 @@ class RealTimeData:
                         break
                 if delete:
                     self.clear_trip_stop_times(trip_id)
+                    trip["recent_arrivals"] = {}
 
     def clear_trip_stop_times(self, trip_id):
         """
@@ -159,6 +178,8 @@ class RealTimeData:
                 del self.stops[stop_id]["stop_times"][route_id]
 
         self.trips[trip_id]["stop_times_count"] = 0
+        if trip_id in self.routes[route_id]["active_trips"]:
+            self.routes[route_id]["active_trips"].remove(trip_id)
         del self.trips[trip_id]["stop_times"]
         self.trips[trip_id]["stop_times"] = {}
 
@@ -184,7 +205,7 @@ class RealTimeData:
 
     def add_arrival(self, trip_id, arrivals):
         """
-        Used to update the timetable by using the previous arrivals time
+        Used to update the timetable by using the previous arrivals' times
         :param trip_id:
         :param arrivals: list of tuples (stop_sequence, timestamp of arrival)
         :return:
@@ -192,9 +213,16 @@ class RealTimeData:
         recent_arrivals = self.trips[trip_id]["recent_arrivals"]
 
         for i in range(len(arrivals)):
+            if arrivals[i][0] in recent_arrivals and abs(arrivals[i][1]-recent_arrivals[arrivals[i][0]])>60*60:
+                #recent_arrivals refers to an old trip
+                #DEBUG
+                logger(f"found old recent arrival {trip_id} {recent_arrivals} {arrivals}")
+                recent_arrivals[arrivals[i][0]] = arrivals[i][1]
             if arrivals[i][0] - 1 in recent_arrivals:
                 if arrivals[i][0] not in recent_arrivals:
-                    self.update_timetable(trip_id, arrivals[i][0], arrivals[i][1] - recent_arrivals[arrivals[i][0] - 1])
+                    timedelta = arrivals[i][1] - recent_arrivals[arrivals[i][0] - 1]
+                    if timedelta < 60*60*24:
+                        self.update_timetable(trip_id, arrivals[i][0], timedelta)
                 if i == 0:
                     del recent_arrivals[arrivals[i][0] - 1]
 
@@ -206,33 +234,32 @@ class RealTimeData:
 
     def update_timetable(self, trip_id, stop_sequence, timedelta):
         version = self.trips[trip_id]["timetable_version"]
-        if stop_sequence in self.routes[self.trips[trip_id]["route_id"]]["timetable"][version]:
-            timetable = self.routes[self.trips[trip_id]["route_id"]]["timetable"][version][stop_sequence]
-            timetable["times"].append(timedelta)
+        timetable = self.routes[self.trips[trip_id]["route_id"]]["timetable"][version][stop_sequence]
+        timetable["times"].append(timedelta)
 
-            oldmean = timetable["mean"]
-            timetable["sum"] += timedelta
-            timetable["sum_sqrd"] += timedelta * timedelta
-            N = timetable["N"]
-            if N == 0:
-                timetable["mean"] = timedelta
-                timetable["var"] = 0
-                timetable["N"] = 1
+        oldmean = timetable["mean"]
+        timetable["sum"] += timedelta
+        timetable["sum_sqrd"] += timedelta * timedelta
+        N = timetable["N"]
+        if N == 0:
+            timetable["mean"] = timedelta
+            timetable["var"] = 0
+            timetable["N"] = 1
+        else:
+            timetable["mean"] += (timedelta - oldmean) / (N + 1)
+            if N >= 30:
+                # max 30 entries in times
+                timetable["sum"] -= timetable["times"][0]
+                timetable["sum_sqrd"] -= timetable["times"][0] * timetable["times"][0]
+                timetable["mean"] += (timetable["mean"] - timetable["times"][0])/N
+                timetable["times"].pop(0)
             else:
-                timetable["mean"] += (timedelta - oldmean) / (N + 1)
-                if N >= 30:
-                    # max 30 entries in times
-                    timetable["sum"] -= timetable["times"][0]
-                    timetable["sum_sqrd"] -= timetable["times"][0] * timetable["times"][0]
-                    timetable["mean"] += (timetable["mean"] - timetable["times"][0])/N
-                    timetable["times"].pop(0)
-                else:
-                    timetable["N"] += 1
+                timetable["N"] += 1
 
-                timetable["var"] = (timetable["sum_sqrd"] / timetable["N"]) - (timetable["sum"] * timetable["sum"]) / \
-                                                                                 (timetable["N"] * timetable["N"])
+            timetable["var"] = (timetable["sum_sqrd"] / timetable["N"]) - (timetable["sum"] * timetable["sum"]) / \
+                                                                             (timetable["N"] * timetable["N"])
 
-            timetable["std_dev"] = math.sqrt(timetable["var"])
+        timetable["std_dev"] = math.sqrt(timetable["var"])
 
     def timetable_outliers_cleaner(self):
         cnt = 0
@@ -437,7 +464,7 @@ def getGTFS():
 
     for trip_id, arrivals in times.items():
         RT.add_arrival(trip_id, arrivals)
-    #|RT.clear_arrivals()
+    RT.clear_arrivals()
     runningGTFS = 0
     print("--- getGTFS: %s seconds ---" % (time.time() - t))
 
@@ -451,7 +478,7 @@ def RTmanager(i, runCounter):
         getRT(runCounter)
 
 def getRT(runCounter):
-    global RT, runningRT
+    global RT, runningRT, modifyingRT
     runningRT = 1
     threading.Timer(15, RTmanager, [0, runCounter + 1]).start()
 
@@ -464,6 +491,7 @@ def getRT(runCounter):
         logger(
             f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
         runningRT = 0
+        modifyingRT = 0
         return 0
     print(getDatetimeNowStr())
     print(f"--- retrieveRT  ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
@@ -471,6 +499,7 @@ def getRT(runCounter):
 
     ct = 0
     updated_trips = set()
+    modifyingRT = 1
     for entity in rt.entity:
         if entity.HasField('trip_update'):
             if RT.check_trip(entity.trip_update.trip.trip_id) == 0:
@@ -478,6 +507,7 @@ def getRT(runCounter):
                     f'{getDatetimeNowStr()} not such trip_id: {entity.trip_update.trip.trip_id},\ncalling getGTFS()')
                 getGTFS()
                 runningRT = 0
+                modifyingRT = 0
                 return 0
             updated_trips.add(entity.trip_update.trip.trip_id)
             RT.clear_trip_stop_times(entity.trip_update.trip.trip_id)
@@ -498,6 +528,7 @@ def getRT(runCounter):
     RT.check_trip_stop_times(updated_trips)
     t = time.time() - t
     print("\033[96m", end="")
+    modifyingRT = 0
     if t > 10:
         print("\u001b[7m", end="")
         logger(f"{getDatetimeNowStr()}--- getRT ({ct} items):\t{t} seconds\t---")
@@ -507,17 +538,21 @@ def getRT(runCounter):
     try:
         response = requests.get('http://percorsieorari.gtt.to.it/das_gtfsrt/vehicle_position.aspx')
         rt.ParseFromString(response.content)
-    except ConnectionError as err:
+    except Exception as err:
         logger(
             f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
         return 0
 
     print(f"--- retrievePos ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
+    modifyingRT = 1
     t = time.time()
     for el in rt.entity:
         if el.HasField('vehicle'):
             v = el.vehicle
-            RT.update_position_trip(v.trip.trip_id, v.position.latitude, v.position.longitude, v.position.bearing, v.timestamp)
+            if RT.check_trip(v.trip.trip_id) == 0:
+                logger(f'{getDatetimeNowStr()} not such trip_id: {entity.trip_update.trip.trip_id},\nignoring trip position')
+            else:
+                RT.update_position_trip(v.trip.trip_id, v.position.latitude, v.position.longitude, v.position.bearing, v.timestamp)
 
     print(f"--- getPos      ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
     if runCounter != 0 and runCounter % 20 == 0:
@@ -525,6 +560,7 @@ def getRT(runCounter):
         cnt = RT.timetable_outliers_cleaner()
         print(f"--- cleaned outliers      ({cnt} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
     runningRT = 0
+    modifyingRT = 0
 
 
 def getStopRT(stopcode):
@@ -535,7 +571,7 @@ def getStopRT(stopcode):
                 key: trip_id-stop_id
                 value: {"trip_id","route_short_name","timestamp","std_dev"}
     """
-    while runningGTFS or runningRT:
+    while runningGTFS or modifyingRT:
         time.sleep(0.01)
 
     if stopcode in RT.stopcodes:
@@ -554,14 +590,14 @@ def getRouteRT(route_id):
                 key of dicts:{"route_id","route_short_name","direction","headsign",
                 "limited","position","stop_times","recent_arrivals"}
     """
-    while runningGTFS or runningRT:
+    while runningGTFS or modifyingRT:
         time.sleep(0.01)
 
     if route_id not in RT.routes:
         return -1, []
     else:
         s = [1, {}]
-        for trip_id in RT.routes[route_id]["trips"]:
+        for trip_id in RT.routes[route_id]["active_trips"]:
             s[1][trip_id] = RT.trips[trip_id]
     return s
 
@@ -604,12 +640,12 @@ def printer():
 
     threading.Timer(200, printer).start()
 
-
 def init(l):
-    global logger, runningRT, runningGTFS
+    global logger, runningRT, runningGTFS, modifyingRT
     logger = l
-    runningRT = 0
-    runningGTFS = 0
+    runningRT = 0   # blocks RT executions
+    runningGTFS = 0 # blocks RT executions and get executions
+    modifyingRT = 0 # blocks get executions, is 1 only while modifying rt, not when getting data from servers
     getGTFS()
     getRT(0)
 
