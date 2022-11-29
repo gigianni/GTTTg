@@ -12,7 +12,7 @@ import requests
 from google.transit import gtfs_realtime_pb2
 import json
 
-global logger, runningRT, runningGTFS, modifyingRT, RT
+global logger, runningRT, runningGTFS, modifyingRT, updatingPos, RT
 
 
 class RealTimeData:
@@ -478,7 +478,7 @@ def RTmanager(i, runCounter):
         getRT(runCounter)
 
 def getRT(runCounter):
-    global RT, runningRT, modifyingRT
+    global RT, runningRT, modifyingRT, updatingPos
     runningRT = 1
     threading.Timer(15, RTmanager, [0, runCounter + 1]).start()
 
@@ -491,7 +491,6 @@ def getRT(runCounter):
         logger(
             f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
         runningRT = 0
-        modifyingRT = 0
         return 0
     print(getDatetimeNowStr())
     print(f"--- retrieveRT  ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
@@ -499,6 +498,8 @@ def getRT(runCounter):
 
     ct = 0
     updated_trips = set()
+    while modifyingRT:
+        time.sleep(0.01)
     modifyingRT = 1
     for entity in rt.entity:
         if entity.HasField('trip_update'):
@@ -528,39 +529,46 @@ def getRT(runCounter):
     RT.check_trip_stop_times(updated_trips)
     t = time.time() - t
     print("\033[96m", end="")
-    modifyingRT = 0
     if t > 10:
         print("\u001b[7m", end="")
         logger(f"{getDatetimeNowStr()}--- getRT ({ct} items):\t{t} seconds\t---")
     print(f"--- getRT" + ' ' * (
             10 - len(str(ct))) + f"({ct} items):\t{'{:.5f}'.format(t)} seconds\t---\u001b[0m")
-    t = time.time()
-    try:
-        response = requests.get('http://percorsieorari.gtt.to.it/das_gtfsrt/vehicle_position.aspx')
-        rt.ParseFromString(response.content)
-    except Exception as err:
-        logger(
-            f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
-        return 0
 
-    print(f"--- retrievePos ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
-    modifyingRT = 1
-    t = time.time()
-    for el in rt.entity:
-        if el.HasField('vehicle'):
-            v = el.vehicle
-            if RT.check_trip(v.trip.trip_id) == 0:
-                logger(f'{getDatetimeNowStr()} not such trip_id: {entity.trip_update.trip.trip_id},\nignoring trip position')
-            else:
-                RT.update_position_trip(v.trip.trip_id, v.position.latitude, v.position.longitude, v.position.bearing, v.timestamp)
-
-    print(f"--- getPos      ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
     if runCounter != 0 and runCounter % 20 == 0:
         t = time.time()
         cnt = RT.timetable_outliers_cleaner()
         print(f"--- cleaned outliers      ({cnt} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
     runningRT = 0
     modifyingRT = 0
+
+    t = time.time()
+    if updatingPos == 0:
+        updatingPos = 1
+        try:
+            response = requests.get('http://percorsieorari.gtt.to.it/das_gtfsrt/vehicle_position.aspx')
+            rt.ParseFromString(response.content)
+        except Exception as err:
+            logger(
+                f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
+            return 0
+
+        print(f"--- retrievePos ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
+        while modifyingRT:
+            time.sleep(0.01)
+        modifyingRT = 1
+        t = time.time()
+        for el in rt.entity:
+            if el.HasField('vehicle'):
+                v = el.vehicle
+                if RT.check_trip(v.trip.trip_id) == 0:
+                    logger(f'{getDatetimeNowStr()} not such trip_id: {v.trip.trip_id},\nignoring trip position')
+                else:
+                    RT.update_position_trip(v.trip.trip_id, v.position.latitude, v.position.longitude, v.position.bearing, v.timestamp)
+
+        print(f"--- getPos      ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
+        modifyingRT = 0
+        updatingPos = 0
 
 
 def getStopRT(stopcode):
@@ -641,11 +649,16 @@ def printer():
     threading.Timer(200, printer).start()
 
 def init(l):
-    global logger, runningRT, runningGTFS, modifyingRT
+    global logger, runningRT, runningGTFS, modifyingRT, updatingPos
     logger = l
-    runningRT = 0   # blocks RT executions
-    runningGTFS = 0 # blocks RT executions and get executions
-    modifyingRT = 0 # blocks get executions, is 1 only while modifying rt, not when getting data from servers
+    # blocks RT executions
+    runningRT = 0
+    # blocks RT executions and get executions
+    runningGTFS = 0
+    # blocks get executions, is 1 only while modifying rt, not when getting data from servers
+    modifyingRT = 0
+    # blocks just retrieving and updating pos (done to not block RT updating while retrieving position which sometimes is really slow)
+    updatingPos = 0
     getGTFS()
     getRT(0)
 
