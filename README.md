@@ -9,11 +9,13 @@ The two dataset used can be found at [GTFS](http://aperto.comune.torino.it/datas
 
 # [The telegram bot](https://t.me/gtt_tgbot)
 
-The bot is right now very simple, it can be used by sending him the code of a stop like shown below:
+The bot, which code is in file [tg.py](https://github.com/gigianni/GTTtg/blob/main/tg.py), is just a simple showcase of the capabilities of GTTtg.
+
+It can send all the forecasted arrivals to a specific stop, by giving the stop code as shown below:
 
 <img src="https://raw.githubusercontent.com/gigianni/GTTTg/main/img/tg_stop.png" width=450px />
 
-The bot will reply with all the estimated arrivals at that stop grouped by route number, at the end of the message users can find buttons for all the routes that are expected to arrive at the stop, by clicking on them the user will receive the position of the first trip and the list of his next stops:
+At the end of the message users can find buttons for all the routes that are expected to arrive at the stop, by clicking on them the user will receive the position and the list of stops (with estimated times) of the first trip of that specific route, example by clicking on Linea 9:
 
 <img src="https://raw.githubusercontent.com/gigianni/GTTTg/main/img/tg_route.png" width=450px />
 
@@ -53,7 +55,7 @@ To run it you just need the tg.py, main.py and a file named tg.txt with the Toke
 # Performance
 
 With the new version performance was a goal for me, especially regarding memory consumption because the project is running on a student free tier vps with only 1GB of RAM.
-For this reason I left out gtfs-kit and pandas to reduce the memory overhead and have full control over the datastructure, unfortunately there's still a peak usage (around 900MB) while loading stop-times.txt with his nearly 2 millions lines, therefore the server must use a swap memory to survive the getGTFS part that is called about once a week.
+For this reason I left out gtfs-kit and pandas to reduce the memory overhead and have full control over the datastructure, unfortunately there's still a peak usage (around 760MB) while loading stop-times.txt with his nearly 2 millions lines, therefore the server must use a swap memory to survive the getGTFS part that is called about once a week.
 Beside that while operating normally the memory consumption is under 600MB, you can find an analysis line by line done by [memory_profiler](https://pypi.org/project/memory-profiler/) [here](https://github.com/gigianni/GTTTg/blob/main/memory%20profile.txt).
 
 For treating the stop_times calculations I've chosen to group the trips of the same route in versions, every version has the same sequence of stops, in this way different trips can share their data and have a richier dataset from which calculate the mean times and there's also less data consumption (every version refers to 41 trips on average).
