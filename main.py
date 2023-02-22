@@ -12,8 +12,15 @@ import requests
 import gtfs_realtime_pb2    # use the self-compiled one
 import json
 
-global logger, runningRT, runningGTFS, modifyingRT, updatingPos, RT
-
+global logger, RT
+# blocks RT executions
+semRT = threading.Semaphore(1)
+# blocks RT executions and get executions
+semGTFS = threading.Semaphore(1)
+# blocks get executions, is 1 only while modifying rt, not when getting data from servers
+semModRT = threading.Semaphore(1)
+# blocks just retrieving and updating pos (done to not block RT updating while retrieving position which sometimes is really slow)
+semPos = threading.Semaphore(1)
 
 class RealTimeData:
     """RT contains all the info got by every poll to the GTFSrt source"""
@@ -286,11 +293,10 @@ class RealTimeData:
         return cnt
 
     def to_JSON(self):
-        global runningRT
-        runningRT = 1
+        semRT.acquire()
         ret = json.dumps(self, default=lambda o: o.__dict__,
                           sort_keys=True, indent=4)
-        runningRT = 0
+        semRT.release()
         return ret
 
 
@@ -308,8 +314,7 @@ def getGTFS():
         Retrieve GTFS data from "https://www.gtt.to.it/open_data/gtt_gtfs.zip"
         and populates RT
     """
-    global runningGTFS
-    runningGTFS = 1
+    semGTFS.acquire()
     t = time.time()
     p = 'https://www.gtt.to.it/open_data/gtt_gtfs.zip'
 
@@ -319,6 +324,7 @@ def getGTFS():
         logger(f'{getDatetimeNowStr()} <b>getGTFS()<\b>\n error retrieving gtt_gtfs.zip {repr(err)}'
                f'\n calling getGTFS()')
         time.sleep(10)
+        semGTFS.release()
         getGTFS()
 
     archive = zipfile.ZipFile(io.BytesIO(r.content))
@@ -465,22 +471,20 @@ def getGTFS():
     for trip_id, arrivals in times.items():
         RT.add_arrival(trip_id, arrivals)
     RT.clear_arrivals()
-    runningGTFS = 0
+    semGTFS.release()
     print("--- getGTFS: %s seconds ---" % (time.time() - t))
 
 
-def RTmanager(i, runCounter):
-    if runningRT or runningGTFS:
-        if i != 0 and i % 10 == 0:
-            logger(f'{getDatetimeNowStr()} <b>RTmanager()<\b>\ngetRT didn\'t run for: {i * 5 + 15} seconds')
-        threading.Timer(5, RTmanager, [i + 1, runCounter]).start()
-    else:
-        getRT(runCounter)
-
 def getRT(runCounter):
-    global RT, runningRT, modifyingRT, updatingPos
-    runningRT = 1
-    threading.Timer(15, RTmanager, [0, runCounter + 1]).start()
+    global RT
+
+    threading.Timer(15, getRT, [runCounter + 1]).start()
+    if not semGTFS.acquire(timeout=10):
+        logger(f'{getDatetimeNowStr()} <b>getRT()<\b>\ngetRT blocked my semGTFS')
+        return 0
+    if not semRT.acquire(timeout=10):
+        logger(f'{getDatetimeNowStr()} <b>getRT()<\b>\ngetRT blocked my semRT')
+        return 0
 
     t = time.time()
     rt = gtfs_realtime_pb2.FeedMessage()
@@ -490,7 +494,8 @@ def getRT(runCounter):
     except Exception as err:
         logger(
             f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
-        runningRT = 0
+        semGTFS.release()
+        semRT.release()
         return 0
     print(getDatetimeNowStr())
     print(f"--- retrieveRT  ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
@@ -498,17 +503,17 @@ def getRT(runCounter):
 
     ct = 0
     updated_trips = set()
-    while modifyingRT:
-        time.sleep(0.01)
-    modifyingRT = 1
+
+    semModRT.acquire()
     for entity in rt.entity:
         if entity.HasField('trip_update'):
             if RT.check_trip(entity.trip_update.trip.trip_id) == 0:
                 logger(
                     f'{getDatetimeNowStr()} not such trip_id: {entity.trip_update.trip.trip_id},\ncalling getGTFS()')
+                semGTFS.release()
+                semRT.release()
+                semModRT.release()
                 getGTFS()
-                runningRT = 0
-                modifyingRT = 0
                 return 0
             updated_trips.add(entity.trip_update.trip.trip_id)
             RT.clear_trip_stop_times(entity.trip_update.trip.trip_id)
@@ -539,24 +544,23 @@ def getRT(runCounter):
         t = time.time()
         cnt = RT.timetable_outliers_cleaner()
         print(f"--- cleaned outliers      ({cnt} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
-    runningRT = 0
-    modifyingRT = 0
+    semRT.release()
+    semModRT.release()
 
     t = time.time()
-    if updatingPos == 0:
-        updatingPos = 1
+    if semPos.acquire(timeout=1):
         try:
             response = requests.get('http://percorsieorari.gtt.to.it/das_gtfsrt/vehicle_position.aspx')
             rt.ParseFromString(response.content)
         except Exception as err:
             logger(
                 f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
+            semGTFS.release()
+            semPos.release()
             return 0
 
         print(f"--- retrievePos ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
-        while modifyingRT:
-            time.sleep(0.01)
-        modifyingRT = 1
+        semModRT.acquire()
         t = time.time()
         for el in rt.entity:
             if el.HasField('vehicle'):
@@ -567,8 +571,9 @@ def getRT(runCounter):
                     RT.update_position_trip(v.trip.trip_id, v.position.latitude, v.position.longitude, v.position.bearing, v.timestamp)
 
         print(f"--- getPos      ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
-        modifyingRT = 0
-        updatingPos = 0
+        semModRT.release()
+        semPos.release()
+    semGTFS.release()
 
 
 def getStopRT(stopcode):
@@ -579,13 +584,19 @@ def getStopRT(stopcode):
                 key: trip_id-stop_id
                 value: {"trip_id","route_short_name","timestamp","std_dev"}
     """
-    while runningGTFS or modifyingRT:
-        time.sleep(0.01)
+    if not semGTFS.acquire(timeout=5):
+        s = (-1, {})
+        return s
+    if not semModRT.acquire(timeout=5):
+        s = (-1, {})
+        return s
 
     if stopcode in RT.stopcodes:
         s = (1, RT.stops[RT.stopcodes[stopcode]])
     else:
         s = (-1, {})
+    semGTFS.release()
+    semModRT.release()
     return s
 
 
@@ -598,15 +609,22 @@ def getRouteRT(route_id):
                 key of dicts:{"route_id","route_short_name","direction","headsign",
                 "limited","position","stop_times","recent_arrivals"}
     """
-    while runningGTFS or modifyingRT:
-        time.sleep(0.01)
+    if not semGTFS.acquire(timeout=5):
+        s = (-1, {})
+        return s
+    if not semModRT.acquire(timeout=5):
+        s = (-1, {})
+        return s
 
     if route_id not in RT.routes:
-        return -1, []
+        s = (-1, {})
     else:
         s = [1, {}]
         for trip_id in RT.routes[route_id]["active_trips"]:
             s[1][trip_id] = RT.trips[trip_id]
+
+    semGTFS.release()
+    semModRT.release()
     return s
 
 """
@@ -649,16 +667,8 @@ def printer():
     threading.Timer(200, printer).start()
 
 def init(l):
-    global logger, runningRT, runningGTFS, modifyingRT, updatingPos
+    global logger
     logger = l
-    # blocks RT executions
-    runningRT = 0
-    # blocks RT executions and get executions
-    runningGTFS = 0
-    # blocks get executions, is 1 only while modifying rt, not when getting data from servers
-    modifyingRT = 0
-    # blocks just retrieving and updating pos (done to not block RT updating while retrieving position which sometimes is really slow)
-    updatingPos = 0
     getGTFS()
     getRT(0)
 
