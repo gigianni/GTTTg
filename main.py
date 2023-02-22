@@ -1,4 +1,4 @@
-# TO-DO: too much wauting flag, check tumestsmp deleter
+# TO-DO: too much waiting flag, check timestamp deleter
 
 import collections
 import csv
@@ -9,7 +9,7 @@ import threading
 import time
 import zipfile
 import requests
-from google.transit import gtfs_realtime_pb2
+import gtfs_realtime_pb2    # use the self-compiled one
 import json
 
 global logger, runningRT, runningGTFS, modifyingRT, updatingPos, RT
