@@ -20,11 +20,9 @@ logger = logging.getLogger(__name__)
 
 def start(update: Update, context: CallbackContext) -> None:
 	"""Send a message when the command /start is issued."""
-	if 'keyboard' in context.user_data:
-		update.message.reply_text("Hi!", reply_markup=ReplyKeyboardMarkup(context.user_data['keyboard'], resize_keyboard=True))
-	else:
-		update.message.reply_text("Hi!", reply_markup=ReplyKeyboardMarkup([["+"]], resize_keyboard=True))
-
+	keyboard = context.user_data.setdefault("keyboard", [["+"]])
+	update.message.reply_text("Ciao,\nPuoi inviare il numero della fermata oppure il numero della linea preceduto "
+							  "da L (per esempio: L15)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def routeNormalizer(text):
 	"""Return route_id format from L<route_short_name> format, route_id could not be present in RT class"""
@@ -35,9 +33,31 @@ def add_command(update: Update, context: CallbackContext) -> None:
 	"""Send a message when the command /add is issued."""
 	if 'add_mode' not in context.user_data or context.user_data['add_mode'] == 0:
 		context.user_data['add_mode'] = 1
-		update.message.reply_text('Rispondi con la fermata di partenza')
+		keyboard = context.user_data.setdefault("keyboard", [["+"]])
+		update.message.reply_text('Rispondi con la fermata di partenza oppure se vuoi eliminare uno dei bottoni giá '
+								  'presenti premilo ora.',reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 	else:
 		if context.user_data['add_mode'] == 1:
+			if update.message.text[0] == '*':
+				# delete button
+				keyboard = context.user_data.setdefault("keyboard", [["+"]])
+				found = False
+				for i in range(len(keyboard)):
+					for j in range(len(keyboard[i])):
+						if keyboard[i][j] == update.message.text:
+							found = True
+							keyboard[i].pop(j)
+							break
+					if found:
+						break
+				context.user_data['add_mode'] = 0
+				if found:
+					context.user_data['keyboard'] = keyboard
+					update.message.reply_text("Eliminato.", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+				else:
+					update.message.reply_text("Non trovato.", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+				return
+
 			context.user_data["add_content"] = update.message.text
 		else:
 			context.user_data["add_content"] += " "+update.message.text
@@ -55,13 +75,14 @@ def save_keyboard(chat_id, context):
 		keyboard[len(keyboard)//3].insert(0, "*"+context.user_data["add_content"])
 		context.user_data['add_mode'] = 0
 		context.user_data['keyboard'] = keyboard
-		upd.bot.sendMessage(chat_id=chat_id, text="Done.", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+		upd.bot.sendMessage(chat_id=chat_id, text="Salvato.", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 
 def discard_keyboard(chat_id, context):
 	"""Saves the keyboard."""
 	context.user_data['add_mode'] = 0
-	upd.bot.sendMessage(chat_id=chat_id, text="Done.")
+	upd.bot.sendMessage(chat_id=chat_id, text="Annullato.",
+						reply_markup=ReplyKeyboardMarkup(context.user_data['keyboard'], resize_keyboard=True))
 
 
 def sendTrackData(chat_id, data):
