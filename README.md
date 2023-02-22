@@ -7,6 +7,11 @@ GTTtg use data from [aperTO](http://aperto.comune.torino.it) for a simple Telegr
 
 The two dataset used can be found at [GTFS](http://aperto.comune.torino.it/dataset/feed-gtfs-trasporti-gtt) and [GTFS-RealTime](http://aperto.comune.torino.it/dataset/feed-gtfs-real-time-trasporti-gtt).
 
+Repositories used are:
+
+- [Google transit](https://developers.google.com/transit/gtfs-realtime/examples/python-sample): For analyzing the GTFS RealTime, actually the module used is already present in this repository compiled with the latest version of Protobuf (Otherwise the one fetched by npm won't run).
+- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot): Version 13.15
+
 # [The telegram bot](https://t.me/gtt_tgbot)
 
 The bot, which code is in file [tg.py](https://github.com/gigianni/GTTtg/blob/main/tg.py), is just a simple showcase of the capabilities of GTTtg.
