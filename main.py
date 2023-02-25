@@ -1,4 +1,4 @@
-# TO-DO: too much waiting flag, check timestamp deleter
+# TO-DO:
 
 import collections
 import csv
@@ -12,15 +12,25 @@ import requests
 import gtfs_realtime_pb2    # use the self-compiled one
 import json
 
+
+class mySet(set):
+    #set with defined __dict__ attribute
+    @property
+    def __dict__(self):
+        return {"set":list(self)}
+
+
 global logger, RT
-# blocks RT executions
+
 semRT = threading.Semaphore(1)
-# blocks RT executions and get executions
+# guarantees only one thread executing getRT at a time (not considering the position part)
 semGTFS = threading.Semaphore(1)
-# blocks get executions, is 1 only while modifying rt, not when getting data from servers
+# blocks every write/read from class RT while a thread it's executing getGTFS
 semModRT = threading.Semaphore(1)
-# blocks just retrieving and updating pos (done to not block RT updating while retrieving position which sometimes is really slow)
+# blocks reading from RT meanwhile a thread executing getRT is modifying the class (not when it's retrieving the data)
 semPos = threading.Semaphore(1)
+# guarantees only one thread at a time executing the pos part of getRT, this part is not considered important as the rest
+# of the function, therefore if a thread is stuck on it (sometimes the retrieving part is slow) the new thread just ignores it
 
 class RealTimeData:
     """RT contains all the info got by every poll to the GTFSrt source"""
@@ -46,8 +56,8 @@ class RealTimeData:
     def add_route(self, data):
         self.routes[data["route_id"]] = {
             "route_short_name": data["route_short_name"],
-            "trips": set(),
-            "active_trips": set(),
+            "trips": mySet(),
+            "active_trips": mySet(),
             "timetable": collections.OrderedDict()
         }
 
@@ -100,6 +110,7 @@ class RealTimeData:
                 "timestamp": 0
             },
             "stop_times": collections.OrderedDict(),
+            "effective_update_timestamp": time.time(),
             "stop_times_count": 0,
             "recent_arrivals": {},
             "timetable_version": ""
@@ -112,16 +123,33 @@ class RealTimeData:
         self.trips[trip_id]["position"]["bearing"] = bearing
         self.trips[trip_id]["position"]["timestamp"] = timestamp
 
-    def set_stop_time(self, trip_id, stop_sequence, timestamp, std_dev):
+    def set_stop_time(self, trip_id, stop_sequence, timestamp, std_dev, previous_stop=-1, ratio=0):
         self.trips[trip_id]["stop_times_count"] += 1
         version = self.trips[trip_id]["timetable_version"]
         route_id = self.trips[trip_id]["route_id"]
         self.routes[route_id]["active_trips"].add(trip_id)
         stop_id = self.routes[route_id]["timetable"][version][stop_sequence]["stop_id"]
+
+        if previous_stop != -1:
+            if stop_id != previous_stop:
+                # True only if the next stop for this trip is different from the last update
+                # This is used to know if a trip is proceding in his way (recent timestamp)
+                # or if it is stuck in the traffic (old timestamp), therefore his timestamp should not be trusted
+                self.trips[trip_id]["effective_update_timestamp"] = time.time()
+                #ratio = 0
+            else:
+                # ratio is equal to elapsed time since last effective_update / expected time to arrive at the next stop
+                t = self.routes[route_id]["timetable"][version][stop_sequence]["mean"]
+                if t == 0:
+                    ratio = 0 #it has no sense if I don't have mean data
+                else:
+                    ratio = (time.time() - self.trips[trip_id]["effective_update_timestamp"]) / t
+
         self.trips[trip_id]["stop_times"][stop_id] = {
             "stop_sequence": stop_sequence,
             "timestamp": timestamp,
-            "std_dev": std_dev
+            "std_dev": std_dev,
+            "effective_update_ratio": ratio
         }
         if route_id not in self.stops[stop_id]["stop_times"]:
             self.stops[stop_id]["stop_times"][route_id] = {
@@ -131,7 +159,8 @@ class RealTimeData:
 
         self.stops[stop_id]["stop_times"][route_id]["times"][trip_id + "-" + stop_id] = {
             "timestamp": timestamp,
-            "std_dev": std_dev
+            "std_dev": std_dev,
+            "effective_update_ratio": ratio
         }
 
     def add_timetable(self, route_id, stops_dic, version):
@@ -179,6 +208,9 @@ class RealTimeData:
             :return:
         """
         route_id = self.trips[trip_id]["route_id"]
+        firstStop = None
+        if len(self.trips[trip_id]["stop_times"]) > 0:
+            firstStop = firstDictKey(self.trips[trip_id]["stop_times"])
         for stop_id in self.trips[trip_id]["stop_times"]:
             del self.stops[stop_id]["stop_times"][route_id]["times"][trip_id + "-" + stop_id]
             if len(self.stops[stop_id]["stop_times"][route_id]["times"]) == 0:
@@ -189,22 +221,29 @@ class RealTimeData:
             self.routes[route_id]["active_trips"].remove(trip_id)
         del self.trips[trip_id]["stop_times"]
         self.trips[trip_id]["stop_times"] = {}
+        return firstStop
 
     def extend_stop_times(self, trip_id):
         stop_times = self.trips[trip_id]["stop_times"]
-        stop_id = next(iter(stop_times))
+        stop_id = firstDictKey(stop_times)
         last_tm = stop_times[stop_id]["timestamp"]
         last_dev = 0
         timetable = self.routes[self.trips[trip_id]["route_id"]]["timetable"][self.trips[trip_id]["timetable_version"]]
+        seconds_since_effective = time.time() - self.trips[trip_id]["effective_update_timestamp"]
 
         cnt = 0
         reached_pos = False
-        for stop_sequence, time in timetable.items():
-            if reached_pos or time["stop_id"] in stop_times:
+        for stop_sequence, t in timetable.items():
+            if reached_pos or t["stop_id"] in stop_times:
+                if not reached_pos:
+                    if t["mean"] == 0:
+                        r = 0 #ratio has no sense if I don't have data about mean
+                    else:
+                        r = seconds_since_effective / t["mean"]
                 reached_pos = True
-                last_tm += time["mean"]
-                last_dev += time["std_dev"]
-                self.set_stop_time(trip_id, stop_sequence, last_tm, last_dev)
+                last_tm += t["mean"]
+                last_dev += t["std_dev"]
+                self.set_stop_time(trip_id, stop_sequence, last_tm, last_dev, ratio=r)
                 cnt += 1
 
         self.trips[trip_id]["stop_times_count"] += cnt
@@ -294,11 +333,17 @@ class RealTimeData:
 
     def to_JSON(self):
         semRT.acquire()
+        semGTFS.acquire()
         ret = json.dumps(self, default=lambda o: o.__dict__,
                           sort_keys=True, indent=4)
         semRT.release()
+        semGTFS.release()
         return ret
 
+
+
+def firstDictKey(dict):
+    return next(iter(dict))
 
 
 def getDatetimeNowStr():
@@ -314,7 +359,9 @@ def getGTFS():
         Retrieve GTFS data from "https://www.gtt.to.it/open_data/gtt_gtfs.zip"
         and populates RT
     """
-    semGTFS.acquire()
+    semRT.acquire() #check if RT is running
+    semGTFS.acquire()   #blocks RT
+    semRT.release()
     t = time.time()
     p = 'https://www.gtt.to.it/open_data/gtt_gtfs.zip'
 
@@ -480,11 +527,13 @@ def getRT(runCounter):
 
     threading.Timer(15, getRT, [runCounter + 1]).start()
     if not semGTFS.acquire(timeout=10):
-        logger(f'{getDatetimeNowStr()} <b>getRT()<\b>\ngetRT blocked my semGTFS')
+        logger(f'{getDatetimeNowStr()} <b>getRT()<\b>\ngetRT blocked by semGTFS')
         return 0
     if not semRT.acquire(timeout=10):
-        logger(f'{getDatetimeNowStr()} <b>getRT()<\b>\ngetRT blocked my semRT')
+        logger(f'{getDatetimeNowStr()} <b>getRT()<\b>\ngetRT blocked by semRT')
         return 0
+    #semGTFS is tested only to see if getGTFS is not running, now everything else is blocked by semRT
+    semGTFS.release()
 
     t = time.time()
     rt = gtfs_realtime_pb2.FeedMessage()
@@ -494,7 +543,6 @@ def getRT(runCounter):
     except Exception as err:
         logger(
             f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
-        semGTFS.release()
         semRT.release()
         return 0
     print(getDatetimeNowStr())
@@ -502,7 +550,7 @@ def getRT(runCounter):
     t = time.time()
 
     ct = 0
-    updated_trips = set()
+    updated_trips = mySet()
 
     semModRT.acquire()
     for entity in rt.entity:
@@ -510,19 +558,18 @@ def getRT(runCounter):
             if RT.check_trip(entity.trip_update.trip.trip_id) == 0:
                 logger(
                     f'{getDatetimeNowStr()} not such trip_id: {entity.trip_update.trip.trip_id},\ncalling getGTFS()')
-                semGTFS.release()
                 semRT.release()
                 semModRT.release()
                 getGTFS()
                 return 0
             updated_trips.add(entity.trip_update.trip.trip_id)
-            RT.clear_trip_stop_times(entity.trip_update.trip.trip_id)
-            counter = 0  # used to load only one estimated time, all the other will estimated by the system
+            previousSubsequentStop = RT.clear_trip_stop_times(entity.trip_update.trip.trip_id)
+            counter = 0  # used to load only one estimated time, all the other will be estimated by the RT class functions
             arrivals = []
             for stopt in entity.trip_update.stop_time_update:
                 if float(stopt.departure.time) >= time.time():
                     if counter == 0:
-                        RT.set_stop_time(entity.trip_update.trip.trip_id, stopt.stop_sequence, stopt.departure.time, 0)
+                        RT.set_stop_time(entity.trip_update.trip.trip_id, stopt.stop_sequence, stopt.departure.time, 0, previousSubsequentStop)
                         ct += RT.extend_stop_times(entity.trip_update.trip.trip_id) + 1
                         counter = 1
                 else:
@@ -555,7 +602,6 @@ def getRT(runCounter):
         except Exception as err:
             logger(
                 f'{getDatetimeNowStr()} <b>getRT()<\b>\nrequest.get(), rt.ParseFromString(response.content) raised ConnectionError: {repr(err)},\naborting')
-            semGTFS.release()
             semPos.release()
             return 0
 
@@ -573,7 +619,6 @@ def getRT(runCounter):
         print(f"--- getPos      ({len(rt.entity)} items):\t{'{:.5f}'.format(time.time() - t)} seconds\t---")
         semModRT.release()
         semPos.release()
-    semGTFS.release()
 
 
 def getStopRT(stopcode):
@@ -660,11 +705,10 @@ def getMapRT(tripId):
 """
 
 def printer():
+    #Function used for having feedback while running only the main.py module
+    #Use it by removing comment before the last two lines: init(print) and printer()
     print(getStopRT("40"))
-    print(getStopRT("3445"))
-    print(getStopRT("471"))
-
-    threading.Timer(200, printer).start()
+    threading.Timer(50, printer).start()
 
 def init(l):
     global logger
@@ -673,3 +717,4 @@ def init(l):
     getRT(0)
 
 #init(print)
+#printer()

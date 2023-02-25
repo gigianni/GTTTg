@@ -145,6 +145,7 @@ def getStopData(text):
 	else:
 		msg = f"<b>{s[1]['stop_name']}</b>\n{s[1]['stop_desc']}\n"
 		i = 0
+		old_effective_update_warning = False
 		for route_id, route_times in s[1]["stop_times"].items():
 			msg += f"\n<b>{route_times['route_short_name']}</b>\n"
 			if not i % 3:
@@ -164,10 +165,17 @@ def getStopData(text):
 					j += 1
 
 				msg += f"\t\t{dt.datetime.fromtimestamp(times[min]['timestamp']).strftime('%H:%M')}" \
-					   f"\t±{round(times[min]['std_dev'])} sec\n"
+					   f"\t±{round(times[min]['std_dev'])} sec"
+				if times[min]["effective_update_ratio"] >= 3:
+					msg += " ⚠️"
+					old_effective_update_warning = True
+				msg += "\n"
 				times.pop(min)
 		reply_markup = InlineKeyboardMarkup(keyboard)
 		location = telegram.Location(longitude=s[1]["stop_lon"], latitude=s[1]["stop_lat"])
+		if old_effective_update_warning:
+			msg += "\nGli aggiornamenti segnalati con ⚠️ indicano un mezzo che sta procedendo più lentamente delle stime, " \
+				   "è plausibile che ci sia un rallentamento."
 	return msg,location,reply_markup
 
 def getRouteData(route_id, trip_id='-1'):
