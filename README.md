@@ -43,27 +43,27 @@ and the position of every trip.
 
 # Usage
 
-GTTtg use [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) and [google transit](https://pypi.org/project/gtfs-realtime-bindings/).
+GTTtg use [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) (v13.15 is in use) and [google transit](https://pypi.org/project/gtfs-realtime-bindings/) (this repository is no more supported by google, therefore I included the file needed compiled with the last version of Protobuf, I suggest to use that for not having compabilities issues).
 To run it you just need the tg.py, main.py and a file named tg.txt with the Token of your telegram bot, this file should be inserted in an exterior folder, you can also hardcode your token in the variable TOKEN at the start of tg.py.
     
     $ python3 tg.py
 
-    --- retrieveGTFS: 33.35247588157654 seconds ---
-    --- 58197 trips reduced to 1408 timetable versions (41:1) ---
-    --- getGTFS: 16.86581301689148 seconds ---
-    25/09/22 21:28:37
-    --- retrieveRT  (122 items):	0.74363 seconds	---
-    --- getRT      (2812 items):	0.23341 seconds	---
-    --- retrievePos (114 items):	0.97912 seconds	---
-    --- getPos      (114 items):	0.00000 seconds	---
+    --- retrieveGTFS: 3.5385632514953613 seconds ---
+    --- 46952 trips reduced to 1440 timetable versions (33:1) ---
+    --- getGTFS: 12.71294093132019 seconds ---
+    23/02/23 11:58:33
+    --- retrieveRT  (472 items):	1.55149 seconds	---
+    --- getRT      (9185 items):	0.10671 seconds	---
+    --- retrievePos (433 items):	2.46884 seconds	---
+    --- getPos      (433 items):	0.00214 seconds	---
 
 # Performance
 
 With the new version performance was a goal for me, especially regarding memory consumption because the project is running on a student free tier vps with only 1GB of RAM.
-For this reason I left out gtfs-kit and pandas to reduce the memory overhead and have full control over the datastructure, unfortunately there's still a peak usage (around 760MB) while loading stop-times.txt with his nearly 2 millions lines, therefore the server must use a swap memory to survive the getGTFS part that is called about once a week.
+For this reason I left out gtfs-kit and pandas to reduce the memory overhead and have full control over the datastructure, unfortunately there's still a peak usage (around 760MB) while loading stop-times.txt with his nearly 2 millions lines, therefore the server must use a swap memory to survive the getGTFS function that is called about once a week.
 Beside that while operating normally the memory consumption is under 600MB, you can find an analysis line by line done by [memory_profiler](https://pypi.org/project/memory-profiler/) [here](https://github.com/gigianni/GTTTg/blob/main/memory%20profile.txt).
 
-For treating the stop_times calculations I've chosen to group the trips of the same route in versions, every version has the same sequence of stops, in this way different trips can share their data and have a richier dataset from which calculate the mean times and there's also less data consumption (every version refers to 41 trips on average).
+For treating the stop_times calculations I've chosen to group the trips of the same route in versions, every version has the same sequence of stops, in this way different trips can share their data and have a richier dataset from which calculate the mean times and there's also less data consumption (every version refers to 33 different trips on average).
 
 Performance on my server, even at peak hour, is good as you can se below, the getGTFS part is really slow for the memory issues, on another machine it takes around 10 seconds. Also getRT is slow at the first run, but after that is always around 0.1 sec.
 
