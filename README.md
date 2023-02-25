@@ -39,7 +39,7 @@ and the position of every trip.
 - stopcodes: a simple translation table implemented by a dict for passing from stop_codes (the numbers you see at the bus stops) to stop_id (the one used in the GTFS system)
 - stop_times: the core of the realtime part, stop_time are referenced both by trips and stops: the former is a [ordered dict](https://docs.python.org/3/library/collections.html#collections.OrderedDict) which indicates for that specific trip which are its next stops and the estimated time of arrival, the latter is a dict containing every routes that has an extimated time of arrival at that stop and for that route a dict with the extimated times
 - recent_arrivals: a dictionary holding the last arrivals of every trip, this is implemented to calculate the time delta between every arrival for updating the timetable mean. Every once a new time is inserted if there's the one referred to the previous stop the time delta is calculated and the previous time deleted. 
-![Diagram](https://raw.githubusercontent.com/gigianni/GTTTg/main/img/GTTtg%20diagram.drawio.png)
+![Diagram](/GTTtg%20diagram.drawio.png?raw=true)
 
 # Usage
 
