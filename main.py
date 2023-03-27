@@ -529,11 +529,12 @@ def getRT(runCounter):
     if not semGTFS.acquire(timeout=10):
         logger(f'{getDatetimeNowStr()} <b>getRT()<\b>\ngetRT blocked by semGTFS')
         return 0
+    # semGTFS is tested only to see if getGTFS is not running, now everything else is blocked by semRT
+    semGTFS.release()
     if not semRT.acquire(timeout=10):
         logger(f'{getDatetimeNowStr()} <b>getRT()<\b>\ngetRT blocked by semRT')
         return 0
-    #semGTFS is tested only to see if getGTFS is not running, now everything else is blocked by semRT
-    semGTFS.release()
+
 
     t = time.time()
     rt = gtfs_realtime_pb2.FeedMessage()
